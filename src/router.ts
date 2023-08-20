@@ -212,33 +212,19 @@ export function commit<R extends BaseRoute = BaseRoute, V = any>(
   resolvePromise: Promise<V>,
   location: Location
 ): Promise<void> {
-  const {history, currentGuard, onLoadingChange = noop} = router;
+  const {history} = router;
   const nextIndex = getHistoryState(router).index + 1;
-  if (router.resolving) {
-    onLoadingChange();
-  }
-  router.resolving = location;
-  onLoadingChange('pending');
-  return currentGuard(resolvePromise)
-    .then((resolvedView) => {
-      router.locationStack = [
-        ...router.locationStack.slice(0, nextIndex),
-        location
-      ];
-      router.viewStack = [
-        ...router.viewStack.slice(0, nextIndex),
-        resolvedView
-      ];
-      history.push(location, {
-        index: nextIndex,
-        locationStack: router.locationStack
-      });
-      onLoadingChange('resolved');
-    })
-    .catch((e) => {
-      onLoadingChange('rejected');
-      throw e;
+  return commitBase(router, resolvePromise, location, (resolvedView) => {
+    router.locationStack = [
+      ...router.locationStack.slice(0, nextIndex),
+      location
+    ];
+    router.viewStack = [...router.viewStack.slice(0, nextIndex), resolvedView];
+    history.push(location, {
+      index: nextIndex,
+      locationStack: router.locationStack
     });
+  });
 }
 
 /**
@@ -254,28 +240,16 @@ export function commitReplace<R extends BaseRoute = BaseRoute, V = any>(
   resolvePromise: Promise<V>,
   location: Location
 ): Promise<void> {
-  const {history, currentGuard, onLoadingChange = noop} = router;
+  const {history} = router;
   const {index} = getHistoryState(router);
-  if (router.resolving) {
-    // Cancel current resolve
-    onLoadingChange();
-  }
-  router.resolving = location;
-  onLoadingChange('pending');
-  return currentGuard(resolvePromise)
-    .then((resolvedView) => {
-      router.locationStack[index] = location;
-      router.viewStack[index] = resolvedView;
-      history.replace(location, {
-        index,
-        locationStack: router.locationStack
-      });
-      onLoadingChange('resolved');
-    })
-    .catch((e) => {
-      onLoadingChange('rejected');
-      throw e;
+  return commitBase(router, resolvePromise, location, (resolvedView) => {
+    router.locationStack[index] = location;
+    router.viewStack[index] = resolvedView;
+    history.replace(location, {
+      index,
+      locationStack: router.locationStack
     });
+  });
 }
 
 function commitBase<R extends BaseRoute = BaseRoute, V = any>(
@@ -284,8 +258,7 @@ function commitBase<R extends BaseRoute = BaseRoute, V = any>(
   location: Location,
   onResolved: (resolvedView: V) => void
 ): Promise<void> {
-  const {history, currentGuard, onLoadingChange = noop} = router;
-  const {index} = getHistoryState(router);
+  const {currentGuard, onLoadingChange = noop} = router;
   if (router.resolving) {
     // Cancel current resolve
     onLoadingChange();
