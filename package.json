@@ -1,0 +1,119 @@
+{
+  "name": "native-router",
+  "version": "0.0.0",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "types": "./dist/types/index.d.ts"
+    }
+  },
+  "types": "./dist/types/index.d.ts",
+  "keywords": [
+    "react",
+    "router",
+    "react router",
+    "react-router",
+    "async",
+    "tiny",
+    "data-fetching",
+    "prefetch",
+    "preview"
+  ],
+  "description": "A route close to the native experience for react.",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "start": "npm test -- --watch",
+    "build": "rm -rf dist && rollup -c && tsc -p tsconfig.production.json && tsc-alias -p tsconfig.production.json",
+    "commit": "lint-staged && git-cz -n",
+    "coverage": "nyc report --reporter=text-lcov > ./.nyc_output/coverage.txt",
+    "lint": "eslint --fix src test demos *.js --ext .js,.jsx,.ts,.tsx",
+    "doc:gen": "typedoc",
+    "deploy": "npm run doc:gen && npm run build:demo && gh-pages -d dist",
+    "test": "cross-env NODE_ENV=test nyc mocha",
+    "preversion": "npm run build",
+    "postversion": "npm publish",
+    "postpublish": "git push --follow-tags && npm run deploy"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wmzy/native-router"
+  },
+  "sideEffects": false,
+  "author": "wmzy",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/wmzy/native-router/issues"
+  },
+  "homepage": "https://github.com/wmzy/native-router",
+  "engines": {
+    "node": ">=14"
+  },
+  "peerDependencies": {
+    "react": "^17.0.0 || ^18.0.0",
+    "react-dom": "^17.0.0 || ^18.0.0"
+  },
+  "dependencies": {
+    "history": "^5.3.0",
+    "path-to-regexp": "^6.2.1"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.22.9",
+    "@babel/preset-env": "^7.22.9",
+    "@babel/preset-react": "^7.22.5",
+    "@babel/preset-typescript": "^7.22.5",
+    "@babel/register": "^7.22.5",
+    "@linaria/babel-preset": "^4.5.4",
+    "@linaria/core": "^4.5.4",
+    "@rollup/plugin-babel": "^6.0.3",
+    "@rollup/plugin-commonjs": "^25.0.4",
+    "@rollup/plugin-node-resolve": "^15.1.0",
+    "@rollup/plugin-replace": "^5.0.2",
+    "@types/mocha": "^10.0.1",
+    "@types/node": "^20.4.5",
+    "@types/react": "^18.2.16",
+    "@types/react-dom": "^18.2.7",
+    "@types/sinon": "^10.0.15",
+    "@typescript-eslint/eslint-plugin": "^6.2.0",
+    "@typescript-eslint/parser": "^6.2.0",
+    "@vitejs/plugin-react": "^4.0.3",
+    "babel-plugin-module-resolver": "^5.0.0",
+    "commitizen": "^4.3.0",
+    "core-js": "^3.31.1",
+    "coveralls": "^3.1.1",
+    "cross-env": "^7.0.3",
+    "eslint": "^8.45.0",
+    "eslint-config-airbnb": "^19.0.4",
+    "eslint-config-airbnb-typescript": "^17.1.0",
+    "eslint-config-prettier": "^8.8.0",
+    "eslint-import-resolver-typescript": "^3.5.5",
+    "eslint-plugin-compat": "^4.1.4",
+    "eslint-plugin-import": "^2.27.5",
+    "eslint-plugin-jsx-a11y": "^6.7.1",
+    "eslint-plugin-mocha": "^10.1.0",
+    "eslint-plugin-prettier": "^5.0.0",
+    "eslint-plugin-react": "^7.33.0",
+    "eslint-plugin-react-hooks": "^4.6.0",
+    "gh-pages": "^5.0.0",
+    "global-jsdom": "^9.0.1",
+    "husky": "^8.0.3",
+    "jsdom": "^22.1.0",
+    "lint-staged": "^13.2.3",
+    "mocha": "^10.2.0",
+    "nyc": "^15.1.0",
+    "prettier": "^3.0.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "rollup": "^3.28.0",
+    "should": "^13.2.3",
+    "should-sinon": "0.0.6",
+    "sinon": "^15.2.0",
+    "terser": "^5.19.2",
+    "tsc-alias": "^1.8.7",
+    "typedoc": "^0.24.8",
+    "typedoc-plugin-mark-react-functional-components": "^0.2.2",
+    "typedoc-plugin-missing-exports": "^2.0.0",
+    "typescript": "^5.1.6"
+  }
+}
