@@ -28,9 +28,13 @@ export function create<R extends BaseRoute = BaseRoute, V = any>(
   resolveView: ResolveView<R, V>,
   options?: Options<V>
 ): RouterInstance<R, V> {
+  type InstanceHistory = RouterInstance<any>['history'];
+
   const [currentGuard, cancelAll] = createCurrentGuard();
-  const {index, locationStack} = getHistoryState({history});
-  const viewStack = [];
+  const {index, locationStack} = getHistoryState({
+    history: history as InstanceHistory
+  });
+  const viewStack = new Array(locationStack.length).fill(null);
 
   if (options?.currentView) {
     viewStack[index] = options.currentView;
@@ -40,7 +44,7 @@ export function create<R extends BaseRoute = BaseRoute, V = any>(
     routes: Array.isArray(routes) ? routes : [routes],
     resolveView,
 
-    history: history as History,
+    history: history as InstanceHistory,
     locationStack,
     viewStack,
     currentGuard,
@@ -59,15 +63,17 @@ export function setOptions<R extends BaseRoute = BaseRoute, V = any>(
   return Object.assign(router, options);
 }
 
-export function getHistoryState({
-  history
-}: Pick<RouterInstance<any>, 'history'>) {
-  const state = (history.location.state || {}) as Partial<
-    Exclude<HistoryState, null>
-  >;
+export function getLocation({history}: Pick<RouterInstance<any>, 'history'>) {
+  const state = (history.location.state || {}) as Partial<HistoryState>;
+  return {...history.location, state: state.state};
+}
+
+function getHistoryState(router: Pick<RouterInstance<any>, 'history'>) {
+  const {location} = router.history;
+  const state = (location.state || {}) as Partial<HistoryState>;
   return {
     index: state.index || 0,
-    locationStack: state.locationStack || [history.location]
+    locationStack: state.locationStack || [getLocation(router)]
   };
 }
 
@@ -222,7 +228,8 @@ export function commit<R extends BaseRoute = BaseRoute, V = any>(
     router.viewStack = [...router.viewStack.slice(0, nextIndex), resolvedView];
     history.push(location, {
       index: nextIndex,
-      locationStack: router.locationStack
+      locationStack: router.locationStack,
+      state: location.state
     });
   });
 }
@@ -247,7 +254,8 @@ export function commitReplace<R extends BaseRoute = BaseRoute, V = any>(
     router.viewStack[index] = resolvedView;
     history.replace(location, {
       index,
-      locationStack: router.locationStack
+      locationStack: router.locationStack,
+      state: location.state
     });
   });
 }
@@ -304,7 +312,7 @@ export function navigate<R extends BaseRoute = BaseRoute, V = any>(
 export function refresh<R extends BaseRoute = BaseRoute, V = any>(
   router: RouterInstance<R, V>
 ) {
-  const {location} = router.history;
+  const location = getLocation(router);
   const viewPromise = resolve(router, location);
   return commitReplace(router, viewPromise, location);
 }
@@ -407,7 +415,7 @@ export function listen<R extends BaseRoute = BaseRoute, V = any>(
   const rmListener = history.listen(({action, location}) => {
     cancel(router);
 
-    const state = location.state as HistoryState;
+    const state = location.state as HistoryState | undefined;
     const index = state?.index || 0;
     const view = router.viewStack[index];
 

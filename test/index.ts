@@ -47,27 +47,42 @@ describe('Router', () => {
     });
   });
 
-  describe('commit', () => {
-    it('should commit the resolve task and push history', () => {
-      // Test code here
-    });
-  });
-
-  describe('commitReplace', () => {
-    it('should commit the resolve task and replace history', () => {
-      // Test code here
-    });
-  });
-
   describe('navigate', () => {
     it('should navigate to a new path', () => {
-      // Test code here
+      const history = createMemoryHistory();
+      const router = create(
+        {path: '', children: [{path: '/foo'}, {path: '/bar'}]},
+        history,
+        (matched) => Promise.resolve(matched.at(-1)!.path)
+      );
+      return navigate(router, '/bar').then(() => {
+        history.location.pathname.should.be.equal('/bar');
+      });
     });
   });
 
   describe('refresh', () => {
     it('should refresh the page', () => {
-      // Test code here
+      let count = 0;
+      const history = createMemoryHistory();
+      const router = create(
+        {path: '', children: [{path: '/foo'}, {path: '/bar'}]},
+        history,
+        (matched) => Promise.resolve([matched.at(-1)!.path, ++count])
+      );
+      return navigate(router, '/bar')
+        .then(() => {
+          history.location.pathname.should.be.equal('/bar');
+          count.should.be.equal(1);
+          router.viewStack[1].should.be.deepEqual(['/bar', 1]);
+        })
+        .then(() => refresh(router))
+        .then(() => {
+          history.location.pathname.should.be.equal('/bar');
+          count.should.be.equal(2);
+          // router.viewStack.length.should.be.eql(1);
+          router.viewStack[1].should.be.deepEqual(['/bar', 2]);
+        });
     });
   });
 

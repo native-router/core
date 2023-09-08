@@ -8,9 +8,15 @@ import type {
   ReactNode
 } from 'react';
 
-export type Location<T = any> = HPath & {state: T};
+export type Location<T = any> = HPath & {state?: T};
 
-export type HistoryState = {locationStack: Location[]; index: number} | null;
+export type HistoryState = {
+  locationStack: Location[];
+  index: number;
+  state?: any;
+};
+
+export type WrappedLocation = Location<HistoryState>;
 
 export type Awaitable<T> = T | Promise<T>;
 
@@ -46,7 +52,7 @@ export type RequiredOf<T, K extends keyof T> = Required<Pick<T, K>> &
 export type RouterInstance<R extends BaseRoute, V = any> = {
   routes: R[];
   baseUrl: string;
-  history: History;
+  history: History & {location: WrappedLocation};
   viewStack: V[];
   locationStack: Location[];
   resolveView: ResolveView<R, V>;
