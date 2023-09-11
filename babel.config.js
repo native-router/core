@@ -26,7 +26,7 @@ module.exports = {
           'module-resolver',
           {
             alias: {
-              'native-router': `${__dirname}/src/index.tsx`,
+              '@native-router/core': `${__dirname}/src/index.tsx`,
               '^@@/(.*)': `${__dirname}/src/\\1`,
               '^@/(.*)': `${__dirname}/demos/\\1`
             },

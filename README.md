@@ -1,7 +1,7 @@
-[![npm](https://img.shields.io/npm/v/native-router.svg)](https://www.npmjs.com/package/native-router)
-[![Build Status](https://github.com/wmzy/native-router/actions/workflows/ci.yml/badge.svg)](https://github.com/wmzy/native-router/actions)
-[![Coverage](https://img.shields.io/codecov/c/github/wmzy/native-router.svg)](https://codecov.io/gh/wmzy/native-router)
-[![install size](https://packagephobia.now.sh/badge?p=native-router)](https://packagephobia.now.sh/result?p=native-router)
+[![npm](https://img.shields.io/npm/v/@native-router/core.svg)](https://www.npmjs.com/package/@native-router/core)
+[![Build Status](https://github.com/wmzy/@native-router/core/actions/workflows/ci.yml/badge.svg)](https://github.com/wmzy/@native-router/core/actions)
+[![Coverage](https://img.shields.io/codecov/c/github/wmzy/@native-router/core.svg)](https://codecov.io/gh/wmzy/@native-router/core)
+[![install size](https://packagephobia.now.sh/badge?p=@native-router/core)](https://packagephobia.now.sh/result?p=@native-router/core)
 
 # Native Router React
 
@@ -21,13 +21,13 @@ English | [简体中文](./README-zh_CN.md)
 ## Install
 
 ```bash
-npm i native-router
+npm i @native-router/core
 ```
 
 ## Usage
 
 ```tsx
-import {View, HistoryRouter as Router} from 'native-router';
+import {View, HistoryRouter as Router} from '@native-router/core';
 import Loading from '@/components/Loading';
 import RouterError from '@/components/RouterError';
 import * as userService from '@/services/user';
@@ -76,4 +76,4 @@ See [demos](/demos/) for a complete example.
 
 ## Documentation 
 
-[API](https://wmzy.github.io/native-router/modules.html)
+[API](https://wmzy.github.io/@native-router/core/modules.html)

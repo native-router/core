@@ -5,6 +5,6 @@
     "required-first"
   ],
   "navigationLinks": {
-    "Demos": "/native-router/demos/"
+    "Demos": "/@native-router/core/demos/"
   }
 }

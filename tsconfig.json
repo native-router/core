@@ -48,8 +48,8 @@
     "baseUrl": ".",                       /* Base directory to resolve non-absolute module names. */
     "paths": {
       "@/*": ["./demos/*"],
-      "native-router/server": ["./src/server.tsx"],
-      "native-router": ["src/index.ts"],
+      "@native-router/core/server": ["./src/server.tsx"],
+      "@native-router/core": ["src/index.ts"],
       "@@/*": ["./src/*"]
     },                                        /* A series of entries which re-map imports to lookup locations relative to the 'baseUrl'. */
     // "rootDirs": [],                        /* List of root folders whose combined content represents the structure of the project at runtime. */
