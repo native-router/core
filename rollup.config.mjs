@@ -5,9 +5,13 @@ import {nodeResolve} from '@rollup/plugin-node-resolve';
 import replace from '@rollup/plugin-replace';
 
 export default {
-  input: 'src/index.ts',
+  input: {
+    index: 'src/index.ts',
+    util: 'src/util.ts'
+  },
   output: {
-    file: 'dist/index.mjs',
+    dir: 'dist',
+    entryFileNames: '[name].mjs',
     format: 'esm'
   },
   external: ['history', 'path-to-regexp'],

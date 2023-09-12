@@ -5,6 +5,10 @@
     ".": {
       "import": "./dist/index.mjs",
       "types": "./dist/types/index.d.ts"
+    },
+    "./util": {
+      "import": "./dist/util.mjs",
+      "types": "./dist/types/util.d.ts"
     }
   },
   "types": "./dist/types/index.d.ts",
