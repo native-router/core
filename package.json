@@ -4,19 +4,18 @@
   "exports": {
     ".": {
       "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs",
       "types": "./dist/types/index.d.ts"
     },
     "./util": {
       "import": "./dist/util.mjs",
+      "require": "./dist/util.cjs",
       "types": "./dist/types/util.d.ts"
     }
   },
   "types": "./dist/types/index.d.ts",
   "keywords": [
-    "react",
     "router",
-    "react router",
-    "react-router",
     "async",
     "tiny",
     "data-fetching",

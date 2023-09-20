@@ -9,11 +9,18 @@ export default {
     index: 'src/index.ts',
     util: 'src/util.ts'
   },
-  output: {
-    dir: 'dist',
-    entryFileNames: '[name].mjs',
-    format: 'esm'
-  },
+  output: [
+    {
+      dir: 'dist',
+      entryFileNames: '[name].mjs',
+      format: 'esm'
+    },
+    {
+      dir: 'dist',
+      entryFileNames: '[name].cjs',
+      format: 'cjs'
+    }
+  ],
   external: ['history', 'path-to-regexp'],
   plugins: [
     babel({

@@ -1,10 +1,10 @@
 {
-  "entryPoints": ["src/index.tsx"],
+  "entryPoints": ["src/index.ts"],
   "out": "dist",
   "sort": [
     "required-first"
   ],
   "navigationLinks": {
-    "Demos": "/@native-router/core/demos/"
+    "Demos": "/@native-router/react/demos/"
   }
 }
