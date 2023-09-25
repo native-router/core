@@ -1,25 +1,11 @@
 module.exports = {
-  presets: [
-    '@babel/typescript',
-    [
-      '@babel/preset-react',
-      {
-        runtime: 'automatic' // defaults to classic
-      }
-    ]
-  ],
+  presets: ['@babel/typescript'],
   env: {
     test: {
       presets: [
         '@linaria',
         ['@babel/env', {targets: {node: true}, modules: 'commonjs'}],
-        '@babel/typescript',
-        [
-          '@babel/preset-react',
-          {
-            runtime: 'automatic' // defaults to classic
-          }
-        ]
+        '@babel/typescript'
       ],
       plugins: [
         [
@@ -36,16 +22,7 @@ module.exports = {
       ]
     },
     production: {
-      presets: [
-        ['@babel/env', {modules: false}],
-        '@babel/typescript',
-        [
-          '@babel/preset-react',
-          {
-            runtime: 'automatic' // defaults to classic
-          }
-        ]
-      ]
+      presets: [['@babel/env', {modules: false}], '@babel/typescript']
     }
   }
 };

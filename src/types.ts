@@ -1,12 +1,5 @@
 import type {Path, MatchResult} from 'path-to-regexp';
 import type {History, Path as HPath} from 'history';
-import type {
-  AnchorHTMLAttributes,
-  ComponentType,
-  Context as ReactContext,
-  DetailedHTMLProps,
-  ReactNode
-} from 'react';
 
 export type Location<T = any> = HPath & {state?: T};
 
@@ -60,38 +53,3 @@ export type RouterInstance<R extends BaseRoute, V = any> = {
   cancelAll(): void;
   resolving?: Location;
 } & RequiredOf<Options<V>, 'baseUrl'>;
-
-export type Context<T extends BaseRoute> = {
-  matched: Matched<T>[];
-  index: number;
-  router: RouterInstance<BaseRoute>;
-  location: Location;
-  params: Record<string, string>;
-};
-
-export type Route = BaseRoute<{
-  name?: string;
-  data?(ctx: Context<Route>): any | Promise<any>;
-  component?(
-    ctx: Context<Route>
-  ): ComponentType | Promise<ComponentType | {default: ComponentType}>;
-}>;
-
-export type StateContext<S> = {
-  SetterContext: ReactContext<((v: S) => void) | undefined>;
-  ValueContext: ReactContext<S | undefined>;
-  Provider: ComponentType<{children: ReactNode}>;
-};
-
-export type LoadStatus = {
-  key: number;
-  status: 'pending' | 'resolved' | 'rejected';
-};
-
-export type LinkProps = {
-  to: string;
-  children?: ReactNode;
-} & DetailedHTMLProps<
-  AnchorHTMLAttributes<HTMLAnchorElement>,
-  HTMLAnchorElement
->;
