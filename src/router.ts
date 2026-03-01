@@ -437,3 +437,19 @@ export function listen<R extends BaseRoute = BaseRoute, V = any>(
     rmListener();
   };
 }
+
+/**
+ * Get current route params from router.
+ * @group Methods
+ * @category Router
+ * @param router router instance
+ * @returns the params object
+ */
+export function getParams<R extends BaseRoute = BaseRoute>(
+  router: RouterInstance<R>
+): Record<string, string> {
+  const {index} = getHistoryState(router);
+  const matched = router.viewStack[index] as unknown as Matched<R>[] | null;
+  if (!matched || !matched.length) return {};
+  return matched[matched.length - 1]?.params ?? {};
+}
