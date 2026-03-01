@@ -128,3 +128,52 @@ describe('Router', () => {
     });
   });
 });
+
+  describe('getParams', () => {
+    it('should get params from router', () => {
+      const history = createMemoryHistory();
+      const router = create(
+        {
+          path: '',
+          children: [
+            {path: '/user/:id'},
+            {path: '/user/:id/post/:postId'}
+          ]
+        },
+        history,
+        () => Promise.resolve(null)
+      );
+      navigate(router, '/user/123');
+      const params = getParams(router);
+      params.should.deepEqual({id: '123'});
+    });
+
+    it('should get multiple params', () => {
+      const history = createMemoryHistory();
+      const router = create(
+        {
+          path: '',
+          children: [
+            {path: '/user/:id/post/:postId'}
+          ]
+        },
+        history,
+        () => Promise.resolve(null)
+      );
+      navigate(router, '/user/123/post/456');
+      const params = getParams(router);
+      params.should.deepEqual({id: '123', postId: '456'});
+    });
+
+    it('should return empty object when no match', () => {
+      const history = createMemoryHistory();
+      const router = create(
+        {path: '', children: [{path: '/foo'}]},
+        history,
+        () => Promise.resolve(null)
+      );
+      navigate(router, '/bar');
+      const params = getParams(router);
+      params.should.deepEqual({});
+    });
+  });
