@@ -34,10 +34,7 @@
     "lint": "eslint --fix src test demos *.js --ext .js,.jsx,.ts,.tsx",
     "doc:gen": "typedoc",
     "deploy": "npm run doc:gen && gh-pages -d dist",
-    "test": "cross-env NODE_ENV=test nyc mocha",
-    "preversion": "npm run build",
-    "postversion": "npm publish",
-    "postpublish": "git push --follow-tags && npm run deploy"
+    "test": "cross-env NODE_ENV=test nyc mocha"
   },
   "repository": {
     "type": "git",
