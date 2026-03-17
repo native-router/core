@@ -5,7 +5,9 @@ on:
     branches: [main]
     paths:
       - "src/**"
+      - "test/**"
       - "package.json"
+      - ".releaserc.json"
       - ".github/workflows/release.yml"
 
 permissions:
