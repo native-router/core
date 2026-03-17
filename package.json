@@ -3,14 +3,14 @@
   "version": "1.0.3",
   "exports": {
     ".": {
+      "types": "./dist/types/index.d.ts",
       "import": "./dist/index.mjs",
-      "require": "./dist/index.cjs",
-      "types": "./dist/types/index.d.ts"
+      "require": "./dist/index.cjs"
     },
     "./util": {
+      "types": "./dist/types/util.d.ts",
       "import": "./dist/util.mjs",
-      "require": "./dist/util.cjs",
-      "types": "./dist/types/util.d.ts"
+      "require": "./dist/util.cjs"
     }
   },
   "types": "./dist/types/index.d.ts",
@@ -38,7 +38,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/native-router/core"
+    "url": "git+https://github.com/native-router/core.git"
   },
   "sideEffects": false,
   "author": "wmzy",
@@ -96,6 +96,7 @@
     "nyc": "^15.1.0",
     "prettier": "^3.0.0",
     "rollup": "^3.28.0",
+    "semantic-release": "^25.0.3",
     "should": "^13.2.3",
     "should-sinon": "0.0.6",
     "sinon": "^15.2.0",
