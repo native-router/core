@@ -144,9 +144,10 @@ describe('Router', () => {
         history,
         () => Promise.resolve(null)
       );
-      navigate(router, '/user/123');
-      const params = getParams(router);
-      params.should.deepEqual({id: '123'});
+      return navigate(router, '/user/123').then(() => {
+        const params = getParams(router);
+        params.should.deepEqual({id: '123'});
+      });
     });
 
     it('should get multiple params', () => {
@@ -161,9 +162,10 @@ describe('Router', () => {
         history,
         () => Promise.resolve(null)
       );
-      navigate(router, '/user/123/post/456');
-      const params = getParams(router);
-      params.should.deepEqual({id: '123', postId: '456'});
+      return navigate(router, '/user/123/post/456').then(() => {
+        const params = getParams(router);
+        params.should.deepEqual({id: '123', postId: '456'});
+      });
     });
 
     it('should return empty object when no match', () => {
@@ -173,8 +175,9 @@ describe('Router', () => {
         history,
         () => Promise.resolve(null)
       );
-      navigate(router, '/bar');
-      const params = getParams(router);
-      params.should.deepEqual({});
+      return navigate(router, '/bar').then(() => {
+        const params = getParams(router);
+        params.should.deepEqual({});
+      });
     });
   });
