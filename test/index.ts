@@ -15,8 +15,7 @@ import {
   createHref,
   cancel,
   initHistoryStack,
-  listen,
-  getParams
+  listen
 } from '../src/router';
 
 describe('Router', () => {
@@ -129,55 +128,3 @@ describe('Router', () => {
     });
   });
 });
-
-  describe('getParams', () => {
-    it('should get params from router', () => {
-      const history = createMemoryHistory();
-      const router = create(
-        {
-          path: '',
-          children: [
-            {path: '/user/:id'},
-            {path: '/user/:id/post/:postId'}
-          ]
-        },
-        history,
-        () => Promise.resolve(null)
-      );
-      return navigate(router, '/user/123').then(() => {
-        const params = getParams(router);
-        params.should.deepEqual({id: '123'});
-      });
-    });
-
-    it('should get multiple params', () => {
-      const history = createMemoryHistory();
-      const router = create(
-        {
-          path: '',
-          children: [
-            {path: '/user/:id/post/:postId'}
-          ]
-        },
-        history,
-        () => Promise.resolve(null)
-      );
-      return navigate(router, '/user/123/post/456').then(() => {
-        const params = getParams(router);
-        params.should.deepEqual({id: '123', postId: '456'});
-      });
-    });
-
-    it('should return empty object when no match', () => {
-      const history = createMemoryHistory();
-      const router = create(
-        {path: '', children: [{path: '/foo'}]},
-        history,
-        () => Promise.resolve(null)
-      );
-      return navigate(router, '/bar').then(() => {
-        const params = getParams(router);
-        params.should.deepEqual({});
-      });
-    });
-  });
