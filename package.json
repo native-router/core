@@ -31,7 +31,7 @@
     "build": "rm -rf dist && rollup -c && tsc -p tsconfig.production.json && tsc-alias -p tsconfig.production.json",
     "commit": "lint-staged && git-cz -n",
     "coverage": "nyc report --reporter=text-lcov > ./.nyc_output/coverage.txt",
-    "lint": "eslint --fix src test demos *.js --ext .js,.jsx,.ts,.tsx",
+    "lint": "eslint --fix src test *.js --ext .js,.jsx,.ts,.tsx",
     "doc:gen": "typedoc",
     "deploy": "npm run doc:gen && gh-pages -d dist",
     "test": "cross-env NODE_ENV=test nyc mocha"
@@ -96,7 +96,6 @@
     "nyc": "^15.1.0",
     "prettier": "^3.0.0",
     "rollup": "^3.28.0",
-    "semantic-release": "^25.0.3",
     "should": "^13.2.3",
     "should-sinon": "0.0.6",
     "sinon": "^15.2.0",
