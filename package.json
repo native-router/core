@@ -38,15 +38,15 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/wmzy/@native-router/core"
+    "url": "https://github.com/native-router/core"
   },
   "sideEffects": false,
   "author": "wmzy",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/wmzy/@native-router/core/issues"
+    "url": "https://github.com/native-router/core/issues"
   },
-  "homepage": "https://github.com/wmzy/@native-router/core",
+  "homepage": "https://github.com/native-router/core",
   "engines": {
     "node": ">=14"
   },
