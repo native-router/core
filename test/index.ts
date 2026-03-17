@@ -15,7 +15,8 @@ import {
   createHref,
   cancel,
   initHistoryStack,
-  listen
+  listen,
+  getParams
 } from '../src/router';
 
 describe('Router', () => {
