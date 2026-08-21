@@ -1,6 +1,6 @@
 [![npm](https://img.shields.io/npm/v/@native-router/core.svg)](https://www.npmjs.com/package/@native-router/core)
-[![Build Status](https://github.com/wmzy/@native-router/core/actions/workflows/ci.yml/badge.svg)](https://github.com/wmzy/@native-router/core/actions)
-[![Coverage](https://img.shields.io/codecov/c/github/wmzy/@native-router/core.svg)](https://codecov.io/gh/wmzy/@native-router/core)
+[![Build Status](https://github.com/native-router/core/actions/workflows/ci.yml/badge.svg)](https://github.com/native-router/core/actions)
+[![Coverage](https://img.shields.io/codecov/c/github/native-router/core.svg)](https://codecov.io/gh/native-router/core)
 [![install size](https://packagephobia.now.sh/badge?p=@native-router/core)](https://packagephobia.now.sh/result?p=@native-router/core)
 
 # Native Router React
@@ -17,6 +17,10 @@ English | [简体中文](./README-zh_CN.md)
 - Link prefetch and preview
 - Most unused features can be tree-shaking
 - SSR support
+
+## Matching semantics
+
+Routes are matched in declaration order and the first match wins — there is no sorting by specificity. Trailing slashes are significant (`/users/` does not match `/users`). Matching is case-sensitive.
 
 ## Install
 
@@ -76,4 +80,4 @@ See [demos](/demos/) for a complete example.
 
 ## Documentation 
 
-[API](https://wmzy.github.io/@native-router/core/modules.html)
+[API](https://native-router.github.io/core/modules.html)

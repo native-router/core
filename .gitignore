@@ -7,9 +7,8 @@ node_modules
 ncp-debug.log
 npm-debug.log
 
-# nyc
+# test coverage (vitest)
 coverage
-.nyc_output
 
 # IDE
 .idea
@@ -23,6 +22,5 @@ tmp
 *.zip
 *.tgz
 
-/.nyc_output
 
 /dist

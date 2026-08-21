@@ -1,6 +1,6 @@
 [![npm](https://img.shields.io/npm/v/@native-router/core.svg)](https://www.npmjs.com/package/@native-router/core)
-[![Build Status](https://github.com/wmzy/@native-router/core/actions/workflows/ci.yml/badge.svg)](https://github.com/wmzy/@native-router/core/actions)
-[![Coverage](https://img.shields.io/codecov/c/github/wmzy/@native-router/core.svg)](https://codecov.io/gh/wmzy/@native-router/core)
+[![Build Status](https://github.com/native-router/core/actions/workflows/ci.yml/badge.svg)](https://github.com/native-router/core/actions)
+[![Coverage](https://img.shields.io/codecov/c/github/native-router/core.svg)](https://codecov.io/gh/native-router/core)
 [![install size](https://packagephobia.now.sh/badge?p=@native-router/core)](https://packagephobia.now.sh/result?p=@native-router/core)
 
 # Native Router React
@@ -17,6 +17,10 @@
 - 链接页面预加载及预览
 - 轻量小巧，Tree-Shaking 友好
 - 支持 TreeShaking
+
+## 匹配语义
+
+路由按声明顺序匹配，先匹配者优先（first-match-wins），不会按特异性排序。尾部斜杠不容错（`/users/` 不会匹配 `/users`）。匹配区分大小写。
 
 ## 安装
 
@@ -77,4 +81,4 @@ export default function App() {
 
 ## 文档 
 
-[API](https://wmzy.github.io/@native-router/core/modules.html)
+[API](https://native-router.github.io/core/modules.html)

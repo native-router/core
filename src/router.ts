@@ -12,6 +12,8 @@ import type {
 import {createCurrentGuard, noop, reject} from './util';
 import {NotFoundError} from './errors';
 
+const DEFAULT_MAX_STACK_DEPTH = 100;
+
 /**
  * Create a router instance.
  * @group Methods
@@ -31,10 +33,16 @@ export function create<R extends BaseRoute = BaseRoute, V = any>(
   type InstanceHistory = RouterInstance<any>['history'];
 
   const [currentGuard, cancelAll] = createCurrentGuard();
-  const {index, locationStack} = getHistoryState({
+  const {index} = getHistoryState({
     history: history as InstanceHistory
   });
-  const viewStack = new Array(locationStack.length).fill(null);
+  // Restore the session stack from the bounded window serialized in the
+  // current entry state; entries before the window become placeholders.
+  // Legacy index-only state(1.x) degrades to a single-entry stack.
+  const locationStack = restoreLocationStack(history as InstanceHistory);
+  const viewStack = new Array(Math.max(index + 1, locationStack.length)).fill(
+    null
+  );
 
   if (options?.currentView) {
     viewStack[index] = options.currentView;
@@ -52,7 +60,8 @@ export function create<R extends BaseRoute = BaseRoute, V = any>(
 
     errorHandler: reject,
     ...options,
-    baseUrl: options?.baseUrl || ''
+    baseUrl: options?.baseUrl || '',
+    maxStackDepth: options?.maxStackDepth || DEFAULT_MAX_STACK_DEPTH
   };
 }
 
@@ -68,12 +77,42 @@ export function getLocation({history}: Pick<RouterInstance<any>, 'history'>) {
   return {...history.location, state: state.state};
 }
 
-function getHistoryState(router: Pick<RouterInstance<any>, 'history'>) {
-  const {location} = router.history;
-  const state = (location.state || {}) as Partial<HistoryState>;
+/**
+ * Restore the in-memory location stack from the bounded window in the
+ * current history entry state. Slots before the window become
+ * placeholders(`undefined`) so {@link initHistoryStack} can skip them
+ * and a POP onto them still falls back to a lazy refresh.
+ */
+function restoreLocationStack(
+  history: RouterInstance<any>['history']
+): Location[] {
+  const state = (history.location.state || {}) as Partial<HistoryState>;
+  const {locationStack, base} = state;
+  return locationStack?.length
+    ? [...new Array<Location>(base || 0), ...locationStack]
+    : [getLocation({history})];
+}
+
+/**
+ * Serialize the tail window of the in-memory stack, bounded by
+ * `maxStackDepth`, together with the absolute index of its first entry.
+ */
+function serializeStack(router: RouterInstance<any>): {
+  base: number;
+  locationStack: Location[];
+} {
+  const {locationStack, maxStackDepth} = router;
+  const windowed = locationStack.slice(-maxStackDepth);
   return {
-    index: state.index || 0,
-    locationStack: state.locationStack || [getLocation(router)]
+    base: locationStack.length - windowed.length,
+    locationStack: windowed
+  };
+}
+
+function getHistoryState(router: Pick<RouterInstance<any>, 'history'>) {
+  const state = (router.history.location.state || {}) as Partial<HistoryState>;
+  return {
+    index: state.index || 0
   };
 }
 
@@ -228,8 +267,8 @@ export function commit<R extends BaseRoute = BaseRoute, V = any>(
     router.viewStack = [...router.viewStack.slice(0, nextIndex), resolvedView];
     history.push(location, {
       index: nextIndex,
-      locationStack: router.locationStack,
-      state: location.state
+      state: location.state,
+      ...serializeStack(router)
     });
   });
 }
@@ -254,8 +293,8 @@ export function commitReplace<R extends BaseRoute = BaseRoute, V = any>(
     router.viewStack[index] = resolvedView;
     history.replace(location, {
       index,
-      locationStack: router.locationStack,
-      state: location.state
+      state: location.state,
+      ...serializeStack(router)
     });
   });
 }
@@ -384,18 +423,27 @@ export function cancel<R extends BaseRoute = BaseRoute, V = any>({
   onLoadingChange();
 }
 
+/**
+ * Restore/warm up the view stack by re-resolving every reachable entry
+ * of the in-memory location stack. Call it after a refresh: in-window
+ * back/forward then switch views without new resolves.
+ *
+ * 恢复/预热内存栈中的可达条目（窗口内有 location 的槽位），刷新后调用
+ * 可让窗口内前进/后退零请求。
+ * @group Methods
+ * @category Router
+ * @param router router instance
+ */
 export function initHistoryStack<R extends BaseRoute = BaseRoute, V = any>(
   router: RouterInstance<R, V>
 ) {
-  const {history} = router;
-  const {locationStack} = getHistoryState(router);
-
-  return Promise.all(locationStack.map((l) => resolve(router, l))).then(
-    (views) => {
-      router.viewStack = views;
-      history.replace(createPath(history.location), history.location.state);
-    }
-  );
+  return Promise.all(
+    router.locationStack.map((location) =>
+      location ? resolve(router, location) : Promise.resolve(null)
+    ) as Promise<V>[]
+  ).then((views) => {
+    router.viewStack = views;
+  });
 }
 
 /**
@@ -420,12 +468,18 @@ export function listen<R extends BaseRoute = BaseRoute, V = any>(
     const view = router.viewStack[index];
 
     onViewChange(view);
-    if (!view) refresh(router);
-
-    if (action === 'POP') {
+    if (!view) {
+      // Lazy fallback for placeholder slots and legacy-shaped state:
+      // re-resolving the landed entry also re-serializes the window
+      // into it via the replace commit.
+      refresh(router);
+    } else if (action === 'POP') {
+      // Sync the current window into the landed entry so a later
+      // refresh("refresh → back → refresh again") still restores it.
       history.replace(createPath(history.location), {
         ...state,
-        locationStack: router.locationStack
+        index,
+        ...serializeStack(router)
       });
     }
   });
@@ -439,7 +493,24 @@ export function listen<R extends BaseRoute = BaseRoute, V = any>(
 }
 
 /**
- * Get current route params from router.
+ * Merge params of all matched levels. Params of deeper levels override
+ * the same keys of shallower ones.
+ * @group Methods
+ * @category Router
+ * @param matched matched route levels, see {@link match}
+ * @returns the merged params object
+ */
+export function mergeMatchedParams<R extends BaseRoute = BaseRoute>(
+  matched: Matched<R>[]
+): Record<string, string> {
+  return matched.reduce<Record<string, string>>(
+    (params, {params: levelParams}) => ({...params, ...levelParams}),
+    {}
+  );
+}
+
+/**
+ * Get current route params from router. Merges params of all matched levels.
  * @group Methods
  * @category Router
  * @param router router instance
@@ -451,5 +522,5 @@ export function getParams<R extends BaseRoute = BaseRoute>(
   const {index} = getHistoryState(router);
   const matched = router.viewStack[index] as unknown as Matched<R>[] | null;
   if (!matched || !matched.length) return {};
-  return matched[matched.length - 1]?.params ?? {};
+  return mergeMatchedParams(matched);
 }

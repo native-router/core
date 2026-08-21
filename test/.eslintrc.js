@@ -1,6 +1,12 @@
 module.exports = {
-  env: {
-    mocha: true
+  globals: {
+    // Provided by vitest `globals: true` (see vitest.config.ts).
+    describe: 'readonly',
+    it: 'readonly',
+    beforeEach: 'readonly',
+    afterEach: 'readonly',
+    before: 'readonly',
+    after: 'readonly'
   },
   rules: {
     'builtin-compat/no-incompatible-builtins': 'off',
