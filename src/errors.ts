@@ -7,3 +7,13 @@ export class NotFoundError extends NativeRouterError {
     super(`Can't find the path: ${pathname}`);
   }
 }
+
+export class RedirectLoopError extends NativeRouterError {
+  constructor(target?: string) {
+    super(
+      `Redirect loop detected${
+        target ? ` after following redirects to: ${target}` : ''
+      }`
+    );
+  }
+}

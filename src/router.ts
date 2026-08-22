@@ -10,9 +10,54 @@ import type {
   HistoryState
 } from './types';
 import {createCurrentGuard, noop, reject} from './util';
-import {NotFoundError} from './errors';
+import {NotFoundError, RedirectLoopError} from './errors';
 
 const DEFAULT_MAX_STACK_DEPTH = 100;
+
+/** Max redirects followed by {@link resolveEntry} before giving up. */
+const MAX_REDIRECTS = 10;
+
+/** Default cache lifetime of {@link preload} results, in milliseconds. */
+const DEFAULT_PRELOAD_TTL = 30_000;
+
+/**
+ * A location resolved through the route guards, together with the view task
+ * of its final target. When guards redirected, `location` is the terminal
+ * location and `task` resolves the view of the target route.
+ */
+export type ResolvedEntry<V> = {location: Location; task: Promise<V>};
+
+/**
+ * Cache record of {@link preload}: the resolution promise of the
+ * prefetched target(every hit within the TTL awaits the very same
+ * promise, which also deduplicates concurrent callers) plus its
+ * expiry timestamp.
+ */
+type PreloadCacheEntry<V> = {
+  entry: Promise<ResolvedEntry<V>>;
+  /**
+   * Terminal location, filled once the entry resolves. A redirect makes
+   * it differ from the cache key, so {@link evictPreloadCache} can drop
+   * the pre-redirect slot when the terminal target is committed.
+   */
+  terminal?: Location;
+  expires: number;
+};
+
+/**
+ * Bookkeeping every {@link create}d router carries on top of
+ * {@link RouterInstance}. Declared in this module(instead of types.ts)
+ * to keep the public instance type surface stable:
+ * - `baseIndex`: absolute history index of `locationStack[0]`. The
+ *   physical(window-relative) stack slot of a history entry is
+ *   `history index - baseIndex`; entries whose slot falls outside the
+ *   memory window re-resolve lazily when landed on.
+ * - `preloadCache`: router-level cache of {@link preload} results.
+ */
+type RouterCore<R extends BaseRoute, V = any> = RouterInstance<R, V> & {
+  baseIndex: number;
+  preloadCache?: Map<string, PreloadCacheEntry<V>>;
+};
 
 /**
  * Create a router instance.
@@ -33,28 +78,28 @@ export function create<R extends BaseRoute = BaseRoute, V = any>(
   type InstanceHistory = RouterInstance<any>['history'];
 
   const [currentGuard, cancelAll] = createCurrentGuard();
-  const {index} = getHistoryState({
-    history: history as InstanceHistory
-  });
-  // Restore the session stack from the bounded window serialized in the
-  // current entry state; entries before the window become placeholders.
-  // Legacy index-only state(1.x) degrades to a single-entry stack.
-  const locationStack = restoreLocationStack(history as InstanceHistory);
-  const viewStack = new Array(Math.max(index + 1, locationStack.length)).fill(
-    null
-  );
-
-  if (options?.currentView) {
-    viewStack[index] = options.currentView;
-  }
-
-  return {
+  const instanceHistory = history as InstanceHistory;
+  const state = (instanceHistory.location.state || {}) as Partial<HistoryState>;
+  const {index} = getHistoryState({history: instanceHistory});
+  // Restore the session window from the bounded location window in the
+  // current entry state. Window-less legacy(1.x index-only) states degrade
+  // to a single-entry window aligned with the landed position.
+  const locationStack = restoreLocationStack(instanceHistory);
+  const baseIndex = state.locationStack?.length
+    ? state.base || 0
+    : // Degraded window: its only entry IS the landed position.
+      index;
+  const router: RouterCore<R, V> = {
     routes: Array.isArray(routes) ? routes : [routes],
     resolveView,
 
-    history: history as InstanceHistory,
+    history: instanceHistory,
     locationStack,
-    viewStack,
+    // The view stack is window-relative, so it is exactly as long as the
+    // location window and stays bounded by maxStackDepth with it.
+    viewStack: new Array(locationStack.length).fill(null),
+    baseIndex,
+    preloadCache: new Map(),
     currentGuard,
     cancelAll,
 
@@ -63,6 +108,18 @@ export function create<R extends BaseRoute = BaseRoute, V = any>(
     baseUrl: options?.baseUrl || '',
     maxStackDepth: options?.maxStackDepth || DEFAULT_MAX_STACK_DEPTH
   };
+
+  if (options?.currentView) {
+    const physical = index - baseIndex;
+    // Hand-crafted or corrupted state may land the index outside the
+    // restored window; skip the write instead of creating a string-keyed
+    // property on the array(a negative index would).
+    if (physical >= 0 && physical < router.viewStack.length) {
+      router.viewStack[physical] = options.currentView;
+    }
+  }
+
+  return router;
 }
 
 export function setOptions<R extends BaseRoute = BaseRoute, V = any>(
@@ -78,33 +135,41 @@ export function getLocation({history}: Pick<RouterInstance<any>, 'history'>) {
 }
 
 /**
- * Restore the in-memory location stack from the bounded window in the
- * current history entry state. Slots before the window become
- * placeholders(`undefined`) so {@link initHistoryStack} can skip them
- * and a POP onto them still falls back to a lazy refresh.
+ * Restore the bounded location window serialized in the current history
+ * entry state, as-is: entries before the window start are outside the
+ * memory window(see {@link RouterCore.baseIndex}) and re-resolve lazily
+ * when landed on. Window-less legacy(1.x index-only) state degrades to a
+ * single-entry window.
  */
 function restoreLocationStack(
   history: RouterInstance<any>['history']
 ): Location[] {
   const state = (history.location.state || {}) as Partial<HistoryState>;
-  const {locationStack, base} = state;
-  return locationStack?.length
-    ? [...new Array<Location>(base || 0), ...locationStack]
+  return state.locationStack?.length
+    ? [...state.locationStack]
     : [getLocation({history})];
 }
 
 /**
- * Serialize the tail window of the in-memory stack, bounded by
- * `maxStackDepth`, together with the absolute index of its first entry.
+ * Serialize the memory window together with the absolute index of its
+ * first entry, so a refresh can restore it. The memory window is trimmed
+ * on every push, so it is already bounded by `maxStackDepth`; the cap
+ * only matters when `maxStackDepth` was lowered via
+ * {@link setOptions} after the fact.
  */
 function serializeStack(router: RouterInstance<any>): {
   base: number;
   locationStack: Location[];
 } {
   const {locationStack, maxStackDepth} = router;
-  const windowed = locationStack.slice(-maxStackDepth);
+  const windowed =
+    locationStack.length > maxStackDepth
+      ? locationStack.slice(-maxStackDepth)
+      : locationStack;
   return {
-    base: locationStack.length - windowed.length,
+    base:
+      (router as RouterCore<any>).baseIndex +
+      (locationStack.length - windowed.length),
     locationStack: windowed
   };
 }
@@ -116,10 +181,19 @@ function getHistoryState(router: Pick<RouterInstance<any>, 'history'>) {
   };
 }
 
+/**
+ * Physical(window-relative) view slot of an absolute history index.
+ * Slots before the window start(negative) or past its end read as
+ * `undefined`, driving the lazy refresh fallback of {@link listen}.
+ */
+function viewAt(router: RouterInstance<any>, index: number) {
+  return router.viewStack[index - (router as RouterCore<any>).baseIndex];
+}
+
 export function getCurrentView<R extends BaseRoute = BaseRoute>(
   router: RouterInstance<R>
 ) {
-  return router.viewStack[getHistoryState(router).index];
+  return viewAt(router, getHistoryState(router).index);
 }
 
 /**
@@ -245,6 +319,172 @@ export function resolveTo<R extends BaseRoute = BaseRoute, V = any>(
 }
 
 /**
+ * Resolve a location through the route guards(`redirect`/`beforeLoad`).
+ *
+ * Guards run per matched level from the shallowest to the deepest. A guard
+ * returning a path string(redirect) restarts the resolution at the new
+ * location — from the shallowest level again, so guards of shallower
+ * levels re-run on every hop(keep side-effectful guards idempotent) —
+ * carrying the original user state; at most
+ * {@link MAX_REDIRECTS 10} redirects are followed before a
+ * {@link RedirectLoopError} is thrown. An unmatched pathname keeps the
+ * {@link resolve resolve} behavior: the task rejects with a
+ * {@link NotFoundError} and is routed through `router.errorHandler`.
+ *
+ * @group Methods
+ * @category Router
+ * @param router router instance
+ * @param location the location to resolve; the object itself is never
+ * mutated — a redirect rebinds the resolution to a new location
+ * @returns the terminal location and its resolve task
+ */
+export async function resolveEntry<R extends BaseRoute = BaseRoute, V = any>(
+  router: RouterInstance<R, V>,
+  location: Location
+): Promise<ResolvedEntry<V>> {
+  const {resolveView, errorHandler} = router;
+  for (let redirects = 0; ; redirects++) {
+    if (redirects > MAX_REDIRECTS) {
+      throw new RedirectLoopError(location.pathname);
+    }
+    const matched = match<R>(router, location.pathname);
+    if (!matched) {
+      return {
+        location,
+        task: Promise.reject(new NotFoundError(location.pathname)).catch(
+          errorHandler
+        )
+      };
+    }
+
+    let redirected = false;
+    for (let i = 0; i < matched.length; i++) {
+      const {route} = matched[i];
+      // `redirect` wins over `beforeLoad`; a non-empty string target
+      // restarts the resolution at the redirected location.
+      const target =
+        route.redirect ??
+        // eslint-disable-next-line no-await-in-loop -- guards must run in declaration order, sequentially
+        (await route.beforeLoad?.({
+          router,
+          location,
+          params: mergeMatchedParams(matched, i)
+        }));
+      if (target) {
+        location = toLocation(router, target, location.state);
+        redirected = true;
+        break;
+      }
+    }
+    // eslint-disable-next-line no-continue -- the redirect loop restarts the outer resolution pass
+    if (redirected) continue;
+
+    return {
+      location,
+      task: resolveView(matched, {router, location}).catch(errorHandler)
+    };
+  }
+}
+
+/**
+ * Resolve a target through the route guards(`redirect`/`beforeLoad`) and
+ * cache the result at the router level, keyed by `pathname + search`.
+ *
+ * Within its TTL(`opts.ttl`, default 30s) repeated and concurrent calls
+ * return the very same entry promise, so concurrent callers share one
+ * resolution(in-flight dedup) and repeated prefetches reuse the resolved
+ * view task instead of re-running guards and `resolveView`. A rejected
+ * resolution(guard error, redirect loop) is evicted from the cache, so
+ * the next call retries it. Committing a navigation({@link commit} or
+ * {@link commitReplace}) consumes the entry and evicts its cache slot —
+ * a later preload re-resolves fresh state, while callers still holding
+ * the old entry keep their references.
+ *
+ * @group Methods
+ * @category Router
+ * @param router router instance
+ * @param to path string
+ * @param opts options; `ttl` is the cache lifetime in milliseconds
+ * @returns the terminal location and its resolve task
+ */
+export function preload<R extends BaseRoute = BaseRoute, V = any>(
+  router: RouterInstance<R, V>,
+  to: string,
+  opts?: {ttl?: number}
+): Promise<ResolvedEntry<V>> {
+  const cache = preloadCacheOf<V>(router);
+  const location = toLocation<R, V>(router, to);
+  const key = preloadLocationKey(location);
+  const cached = cache.get(key);
+  if (cached && Date.now() < cached.expires) {
+    return cached.entry;
+  }
+  prunePreloadCache(cache);
+  const entry = resolveEntry<R, V>(router, location);
+  const record: PreloadCacheEntry<V> = {
+    entry,
+    expires: Date.now() + (opts?.ttl ?? DEFAULT_PRELOAD_TTL)
+  };
+  cache.set(key, record);
+  entry.then(
+    (resolved) => {
+      record.terminal = resolved.location;
+    },
+    () => {
+      // Never cache a failure: evict the slot(this record only, a newer
+      // preload may already have replaced it) so the next call retries.
+      if (cache.get(key)?.entry === entry) cache.delete(key);
+    }
+  );
+  return entry;
+}
+
+function preloadLocationKey(location: Location) {
+  return location.pathname + location.search;
+}
+
+/**
+ * Drop expired records. Runs on every cache write, so distinct prefetched
+ * targets never accumulate beyond their TTL in a long session.
+ */
+function prunePreloadCache<V>(cache: Map<string, PreloadCacheEntry<V>>) {
+  const now = Date.now();
+  cache.forEach((record, key) => {
+    if (record.expires <= now) cache.delete(key);
+  });
+}
+
+/**
+ * Evict the cache slots consumed by a committed navigation. A redirecting
+ * entry is cached under its pre-redirect key while its terminal location
+ * differs, so records whose terminal resolves to the committed location
+ * are dropped too; in-flight records(terminal not yet known) are left to
+ * the TTL.
+ */
+function evictPreloadCache<V>(
+  router: RouterInstance<any, V>,
+  location: Location
+) {
+  const cache = preloadCacheOf<V>(router);
+  const key = preloadLocationKey(location);
+  cache.delete(key);
+  cache.forEach((record, k) => {
+    if (record.terminal && preloadLocationKey(record.terminal) === key) {
+      cache.delete(k);
+    }
+  });
+}
+
+function preloadCacheOf<V>(
+  router: RouterInstance<any, V>
+): Map<string, PreloadCacheEntry<V>> {
+  const core = router as RouterCore<any, V>;
+  // create() always seeds the cache; the lazy path keeps hand-built
+  // router-shaped objects working.
+  return (core.preloadCache ??= new Map());
+}
+
+/**
  * Commit the resolve task and push history.
  * @group Methods
  * @category Router
@@ -257,20 +497,56 @@ export function commit<R extends BaseRoute = BaseRoute, V = any>(
   resolvePromise: Promise<V>,
   location: Location
 ): Promise<void> {
+  // Wrap the raw task so external callers share the guarded entry
+  // pipeline; the entry location is the given one, as-is.
+  return pushEntry(
+    router as RouterCore<R, V>,
+    Promise.resolve({location, task: resolvePromise} as ResolvedEntry<V>),
+    location
+  );
+}
+
+function pushEntry<R extends BaseRoute = BaseRoute, V = any>(
+  router: RouterCore<R, V>,
+  entryPromise: Promise<ResolvedEntry<V>>,
+  fromLocation: Location
+): Promise<void> {
   const {history} = router;
   const nextIndex = getHistoryState(router).index + 1;
-  return commitBase(router, resolvePromise, location, (resolvedView) => {
-    router.locationStack = [
-      ...router.locationStack.slice(0, nextIndex),
-      location
-    ];
-    router.viewStack = [...router.viewStack.slice(0, nextIndex), resolvedView];
-    history.push(location, {
-      index: nextIndex,
-      state: location.state,
-      ...serializeStack(router)
-    });
-  });
+  return commitBase(
+    router,
+    entryPromise,
+    fromLocation,
+    (resolvedView, entry) => {
+      const {location} = entry;
+      let next = nextIndex - router.baseIndex;
+      if (next < 0 || next > router.locationStack.length) {
+        // The current entry sits outside the memory window(a push while an
+        // out-of-window lazy refresh is still pending): restart the window
+        // at the pushed position. Out-of-window neighbours re-resolve
+        // lazily when landed on.
+        router.baseIndex = nextIndex;
+        router.locationStack = [];
+        router.viewStack = [];
+        next = 0;
+      }
+      router.locationStack = [...router.locationStack.slice(0, next), location];
+      router.viewStack = [...router.viewStack.slice(0, next), resolvedView];
+      // Bound the memory window: evict the oldest entries once the stack
+      // outgrows maxStackDepth, shifting the window base along.
+      if (router.locationStack.length > router.maxStackDepth) {
+        const evicted = router.locationStack.length - router.maxStackDepth;
+        router.locationStack = router.locationStack.slice(evicted);
+        router.viewStack = router.viewStack.slice(evicted);
+        router.baseIndex += evicted;
+      }
+      history.push(location, {
+        index: nextIndex,
+        state: location.state,
+        ...serializeStack(router)
+      });
+    }
+  );
 }
 
 /**
@@ -286,24 +562,55 @@ export function commitReplace<R extends BaseRoute = BaseRoute, V = any>(
   resolvePromise: Promise<V>,
   location: Location
 ): Promise<void> {
+  return replaceEntry(
+    router as RouterCore<R, V>,
+    Promise.resolve({location, task: resolvePromise} as ResolvedEntry<V>),
+    location
+  );
+}
+
+function replaceEntry<R extends BaseRoute = BaseRoute, V = any>(
+  router: RouterCore<R, V>,
+  entryPromise: Promise<ResolvedEntry<V>>,
+  fromLocation: Location
+): Promise<void> {
   const {history} = router;
   const {index} = getHistoryState(router);
-  return commitBase(router, resolvePromise, location, (resolvedView) => {
-    router.locationStack[index] = location;
-    router.viewStack[index] = resolvedView;
-    history.replace(location, {
-      index,
-      state: location.state,
-      ...serializeStack(router)
-    });
-  });
+  return commitBase(
+    router,
+    entryPromise,
+    fromLocation,
+    (resolvedView, entry) => {
+      const {location} = entry;
+      const physical = index - router.baseIndex;
+      if (physical < 0 || physical >= router.locationStack.length) {
+        // The landed entry is outside the memory window(the browser evicted
+        // older history past the window, or a window-less legacy state).
+        // Restart the window at the landed position — placeholders for the
+        // unknown gap slots are gone, so neighbouring out-of-window entries
+        // re-resolve lazily on every POP, consistent with the rare
+        // browser-evicted paths.
+        router.baseIndex = index;
+        router.locationStack = [location];
+        router.viewStack = [resolvedView];
+      } else {
+        router.locationStack[physical] = location;
+        router.viewStack[physical] = resolvedView;
+      }
+      history.replace(location, {
+        index,
+        state: location.state,
+        ...serializeStack(router)
+      });
+    }
+  );
 }
 
 function commitBase<R extends BaseRoute = BaseRoute, V = any>(
   router: RouterInstance<R, V>,
-  resolvePromise: Promise<V>,
+  entryPromise: Promise<ResolvedEntry<V>>,
   location: Location,
-  onResolved: (resolvedView: V) => void
+  onResolved: (resolvedView: V, entry: ResolvedEntry<V>) => void
 ): Promise<void> {
   const {currentGuard, onLoadingChange = noop} = router;
   if (router.resolving) {
@@ -313,11 +620,30 @@ function commitBase<R extends BaseRoute = BaseRoute, V = any>(
   router.resolving = location;
   onLoadingChange('pending');
   return (
-    currentGuard(resolvePromise)
-      .then(onResolved)
-      // eslint-disable-next-line no-void
-      .then(() => void onLoadingChange('resolved'))
+    // The whole chain — route guards AND the view task — is guarded from
+    // the very start: a superseding navigation or a cancel() while slow
+    // guards are still running parks this chain forever, exactly like
+    // during the view phase.
+    currentGuard(
+      entryPromise.then((entry) =>
+        entry.task.then((resolvedView) => ({entry, resolvedView}))
+      )
+    )
+      .then(({entry, resolvedView}) => {
+        onResolved(resolvedView, entry);
+        // The navigation consumed this resolution: drop its preload
+        // cache slots so a later preload re-resolves fresh state.
+        evictPreloadCache<V>(router, entry.location);
+      })
+      .then(() => {
+        // This chain settled, so it is no longer in flight. Superseded
+        // chains park forever, so only the latest chain can reach here:
+        // the mark is always ours to clear.
+        router.resolving = undefined;
+        onLoadingChange('resolved');
+      })
       .catch((e) => {
+        router.resolving = undefined;
         onLoadingChange('rejected');
         throw e;
       })
@@ -325,7 +651,11 @@ function commitBase<R extends BaseRoute = BaseRoute, V = any>(
 }
 
 /**
- * Navigate to a new path.
+ * Navigate to a new path. Route guards(`redirect`/`beforeLoad`) run before
+ * the view resolves; the history entry is committed on the terminal
+ * location when guards redirected. The guard phase is part of the
+ * cancelable navigation: a superseding navigate or a `cancel()` while
+ * guards are still running discards this navigation.
  * @group Methods
  * @category Router
  * @param router router instance
@@ -338,12 +668,16 @@ export function navigate<R extends BaseRoute = BaseRoute, V = any>(
   state?: any
 ): Promise<void> {
   const location = toLocation(router, to, state);
-  const viewPromise = resolve(router, location);
-  return commit(router, viewPromise, location);
+  return pushEntry(
+    router as RouterCore<R, V>,
+    resolveEntry<R, V>(router, location),
+    location
+  );
 }
 
 /**
- * Refresh the page.
+ * Refresh the page. Route guards run before the view resolves; a redirect
+ * replaces the current entry with the terminal location.
  * @group Methods
  * @category Router
  * @param router router instance
@@ -352,8 +686,11 @@ export function refresh<R extends BaseRoute = BaseRoute, V = any>(
   router: RouterInstance<R, V>
 ) {
   const location = getLocation(router);
-  const viewPromise = resolve(router, location);
-  return commitReplace(router, viewPromise, location);
+  return replaceEntry(
+    router as RouterCore<R, V>,
+    resolveEntry<R, V>(router, location),
+    location
+  );
 }
 
 /**
@@ -415,12 +752,15 @@ export function createHref<R extends BaseRoute = BaseRoute, V = any>(
  * @category Router
  * @param router router instance
  */
-export function cancel<R extends BaseRoute = BaseRoute, V = any>({
-  cancelAll,
-  onLoadingChange = noop
-}: RouterInstance<R, V>) {
-  cancelAll();
-  onLoadingChange();
+export function cancel<R extends BaseRoute = BaseRoute, V = any>(
+  router: RouterInstance<R, V>
+) {
+  // The cancelled chain parks forever, so nothing else will clear the
+  // in-flight mark: drop it here, or a later navigation would fire a
+  // spurious cancel signal(`onLoadingChange()`) for a dead resolve.
+  router.resolving = undefined;
+  router.cancelAll();
+  router.onLoadingChange?.();
 }
 
 /**
@@ -438,9 +778,7 @@ export function initHistoryStack<R extends BaseRoute = BaseRoute, V = any>(
   router: RouterInstance<R, V>
 ) {
   return Promise.all(
-    router.locationStack.map((location) =>
-      location ? resolve(router, location) : Promise.resolve(null)
-    ) as Promise<V>[]
+    router.locationStack.map((location) => resolve<R, V>(router, location))
   ).then((views) => {
     router.viewStack = views;
   });
@@ -465,14 +803,16 @@ export function listen<R extends BaseRoute = BaseRoute, V = any>(
 
     const state = location.state as HistoryState | undefined;
     const index = state?.index || 0;
-    const view = router.viewStack[index];
+    const view = viewAt(router, index);
 
     onViewChange(view);
     if (!view) {
-      // Lazy fallback for placeholder slots and legacy-shaped state:
-      // re-resolving the landed entry also re-serializes the window
-      // into it via the replace commit.
-      refresh(router);
+      // Lazy fallback for out-of-window slots and window-less legacy
+      // state: re-resolving the landed entry also re-serializes the
+      // window into it via the replace commit. A guard failure here
+      // must not surface as an unhandled rejection — the landed entry
+      // simply keeps its(unknown) view.
+      refresh(router).catch(noop);
     } else if (action === 'POP') {
       // Sync the current window into the landed entry so a later
       // refresh("refresh → back → refresh again") still restores it.
@@ -493,24 +833,35 @@ export function listen<R extends BaseRoute = BaseRoute, V = any>(
 }
 
 /**
- * Merge params of all matched levels. Params of deeper levels override
+ * Merge params of the matched levels. Params of deeper levels override
  * the same keys of shallower ones.
+ *
+ * When `end` is given, only the levels up to and including `end` are
+ * merged — the accumulated params a level at index `end` sees(shallow →
+ * current level). Omitting `end` merges every level.
  * @group Methods
  * @category Router
  * @param matched matched route levels, see {@link match}
+ * @param end the index of the last level to merge, defaults to the deepest
  * @returns the merged params object
  */
 export function mergeMatchedParams<R extends BaseRoute = BaseRoute>(
-  matched: Matched<R>[]
+  matched: Matched<R>[],
+  end?: number
 ): Record<string, string> {
-  return matched.reduce<Record<string, string>>(
-    (params, {params: levelParams}) => ({...params, ...levelParams}),
-    {}
-  );
+  return matched
+    .slice(0, end === undefined ? matched.length : end + 1)
+    .reduce<
+      Record<string, string>
+    >((params, {params: levelParams}) => ({...params, ...levelParams}), {});
 }
 
 /**
- * Get current route params from router. Merges params of all matched levels.
+ * Get current route params from router. The params are re-derived by
+ * matching the current entry of {@link RouterInstance.locationStack} so
+ * they stay correct even when the view stack holds resolved views
+ * (e.g. React elements) instead of match results. Merges params of all
+ * matched levels; deeper levels override shallower ones.
  * @group Methods
  * @category Router
  * @param router router instance
@@ -520,7 +871,8 @@ export function getParams<R extends BaseRoute = BaseRoute>(
   router: RouterInstance<R>
 ): Record<string, string> {
   const {index} = getHistoryState(router);
-  const matched = router.viewStack[index] as unknown as Matched<R>[] | null;
-  if (!matched || !matched.length) return {};
-  return mergeMatchedParams(matched);
+  const location =
+    router.locationStack[index - (router as RouterCore<R>).baseIndex];
+  if (!location) return {};
+  return mergeMatchedParams(match(router, location.pathname) ?? []);
 }

@@ -25,9 +25,67 @@ export type WrappedLocation = Location<HistoryState>;
 
 export type Awaitable<T> = T | Promise<T>;
 
+/**
+ * Params contributed by a single path segment: `:name` is required,
+ * `:name?` is optional, anything else(static or wildcard) contributes
+ * nothing.
+ *
+ * Only the segment-exact forms of the path-to-regexp 6 syntax are
+ * modeled. Prefix/suffix params(`/page-:id`), repetitions(`:id*`,
+ * `:id+`) and custom regexes(`:id(\\d+)`) are matched at runtime but
+ * not modeled here — they simply contribute no keys.
+ * @group Types
+ * @category Route
+ */
+export type PathParamsOf<Seg extends string> = Seg extends `:${infer Name}?`
+  ? {[K in Name & string]?: string}
+  : Seg extends `:${infer Name}`
+    ? {[K in Name & string]: string}
+    : {};
+
+/**
+ * Extract the params shape of a route path pattern. Splits the pattern
+ * into `/`-separated segments and intersects the params of each, e.g.
+ * `ExtractPathParams<'/users/:id/posts/:postId?'>` is
+ * `{id: string} & {postId?: string}`.
+ *
+ * Within the modeled path-to-regexp 6 syntax scope(see
+ * {@link PathParamsOf}); wildcards(`*`) and static segments are
+ * ignored. Distributes over unions of patterns.
+ * @group Types
+ * @category Route
+ */
+export type ExtractPathParams<P extends string> =
+  P extends `${infer Head}/${infer Rest}`
+    ? PathParamsOf<Head> & ExtractPathParams<Rest>
+    : PathParamsOf<P>;
+
+/**
+ * Context passed to a route guard({@link BaseRoute.beforeLoad beforeLoad}).
+ * `params` are accumulated from the root level down to the level that
+ * owns the guard, so a guard only sees params of itself and its parents.
+ */
+// eslint-disable-next-line no-use-before-define -- generic default referencing a type declared below
+export type GuardContext<R extends BaseRoute = BaseRoute> = {
+  // eslint-disable-next-line no-use-before-define
+  router: RouterInstance<R>;
+  location: Location;
+  params: Record<string, string>;
+};
+
 export type BaseRoute<T = any> = {
   path?: Path;
   children?: BaseRoute<T>[];
+  /**
+   * Static redirect target. When set, navigating to this route is
+   * redirected to the target path before the view resolves.
+   */
+  redirect?: string;
+  /**
+   * Route guard invoked before the view resolves. Return a path string
+   * to redirect, or nothing(`undefined`) to continue.
+   */
+  beforeLoad?(ctx: GuardContext<BaseRoute<T>>): Awaitable<string | void>;
 } & Omit<T, 'path' | 'children'>;
 
 export type Matched<R extends BaseRoute = BaseRoute> = {route: R} & MatchResult<

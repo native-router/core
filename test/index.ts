@@ -20,9 +20,15 @@ import {
   initHistoryStack,
   getCurrentView,
   getParams,
+  preload,
   mergeMatchedParams
 } from '../src/router';
 import type {HistoryState} from '../src/types';
+import {
+  NativeRouterError,
+  NotFoundError,
+  RedirectLoopError
+} from '../src/errors';
 
 describe('Router', () => {
   describe('match', () => {
@@ -64,6 +70,41 @@ describe('Router', () => {
       return navigate(router, '/bar').then(() => {
         history.location.pathname.should.be.equal('/bar');
       });
+    });
+
+    it('should clear the in-flight mark once the navigation settles', async () => {
+      const statuses: (string | undefined)[] = [];
+      const history = createMemoryHistory({initialEntries: ['/']});
+      const router = create(
+        {path: '', children: [{path: '/'}, {path: '/a'}, {path: '/b'}]},
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`),
+        {onLoadingChange: (status) => statuses.push(status)}
+      );
+
+      // A settled navigation is no longer in flight.
+      await navigate(router, '/a');
+      (router.resolving === undefined).should.be.true();
+
+      // A rejected navigation clears the mark too.
+      try {
+        await navigate(router, '/missing');
+      } catch {
+        // NotFoundError, expected.
+      }
+      (router.resolving === undefined).should.be.true();
+
+      // Neither settled navigation leaves a stale mark behind: the last
+      // navigation fires no spurious cancel signal at its start.
+      await navigate(router, '/b');
+      statuses.should.deepEqual([
+        'pending',
+        'resolved',
+        'pending',
+        'rejected',
+        'pending',
+        'resolved'
+      ]);
     });
   });
 
@@ -119,8 +160,47 @@ describe('Router', () => {
   });
 
   describe('cancel', () => {
+    const tick = () =>
+      new Promise((done) => {
+        setTimeout(done);
+      });
+
     it('should cancel the current navigate', () => {
       // Test code here
+    });
+
+    it('should clear the in-flight mark so a later navigate fires no spurious cancel signal', async () => {
+      const statuses: (string | undefined)[] = [];
+      const history = createMemoryHistory({initialEntries: ['/']});
+      const router = create(
+        {
+          path: '',
+          children: [
+            {path: '/'},
+            {
+              path: '/guarded',
+              async beforeLoad() {
+                await tick();
+                await tick();
+              }
+            }
+          ]
+        },
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`),
+        {onLoadingChange: (status) => statuses.push(status)}
+      );
+
+      // The cancelled chain parks forever; its in-flight mark must go.
+      navigate(router, '/guarded').catch(() => undefined);
+      statuses.should.deepEqual(['pending']);
+      cancel(router);
+      (router.resolving === undefined).should.be.true();
+
+      // The next navigation starts clean — no spurious `onLoadingChange()`
+      // (undefined status) for the dead resolve.
+      await navigate(router, '/');
+      statuses.should.deepEqual(['pending', undefined, 'pending', 'resolved']);
     });
   });
 
@@ -185,9 +265,10 @@ describe('Router', () => {
       history.location.pathname.should.equal('/bar');
       views.at(-1)!.should.equal('view:/bar:2');
       (history.location.state as HistoryState).index.should.equal(1);
-      // The refresh replaced in place, the index did not change.
-      router.viewStack.length.should.equal(3);
-      router.viewStack[1]!.should.equal('view:/bar:2');
+      // The lazy refresh restarted the window at the landed slot; the
+      // refresh replaced in place, the index did not change.
+      router.viewStack.length.should.equal(1);
+      router.viewStack[0]!.should.equal('view:/bar:2');
     });
 
     it('should keep the index when replacing, so a back POP still lands on the previous entry', async () => {
@@ -236,6 +317,74 @@ describe('Router', () => {
       state
         .locationStack!.map((l) => l.pathname)
         .should.deepEqual(['/foo', '/bar', '/baz']);
+    });
+
+    it('should let a POP cancel a navigation still running its guards', async () => {
+      const history = createMemoryHistory({
+        initialEntries: ['/a', '/b'],
+        initialIndex: 1
+      });
+      const router = create(
+        {
+          path: '',
+          children: [
+            {path: '/a'},
+            {path: '/b'},
+            {
+              path: '/guarded',
+              async beforeLoad() {
+                await tick();
+                await tick();
+              }
+            }
+          ]
+        },
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      listen(router, () => undefined);
+      await tick();
+
+      navigate(router, '/guarded').catch(() => undefined);
+      go(router, -1);
+      await tick();
+      await tick();
+      await tick();
+
+      // The POP cancelled the guarded navigation: the slow guards
+      // finishing later must not push over the landed entry.
+      history.location.pathname.should.equal('/a');
+    });
+
+    it('should not produce an unhandled rejection when a guard fails in the lazy refresh path', async () => {
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => unhandled.push(reason);
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        const history = createMemoryHistory({initialEntries: ['/guarded']});
+        const router = create(
+          {
+            path: '',
+            children: [
+              {
+                path: '/guarded',
+                beforeLoad() {
+                  throw new Error('guard boom');
+                }
+              }
+            ]
+          },
+          history,
+          () => Promise.resolve(null)
+        );
+        listen(router, () => undefined);
+        await tick();
+        await tick();
+
+        unhandled.should.deepEqual([]);
+      } finally {
+        process.off('unhandledRejection', onUnhandled);
+      }
     });
   });
 
@@ -383,10 +532,13 @@ describe('Router', () => {
           .should.deepEqual(['/c', '/d', '/e']);
         // The window starts at absolute index 2: /a and /b are evicted.
         state.base!.should.equal(2);
-        // The in-memory stack still holds the whole session.
+        // The in-memory window is bounded too: it mirrors the serialized
+        // window exactly, and the base records the eviction offset.
         router.locationStack
           .map((l) => l.pathname)
-          .should.deepEqual(['/a', '/b', '/c', '/d', '/e']);
+          .should.deepEqual(['/c', '/d', '/e']);
+        (router as any).baseIndex.should.equal(2);
+        router.viewStack.length.should.equal(3);
 
         // A replace keeps the window capped as well.
         await refresh(router);
@@ -395,7 +547,7 @@ describe('Router', () => {
         replaced.base!.should.equal(2);
       });
 
-      it('should restore a windowed stack with placeholders and lazily refresh evicted slots', async () => {
+      it('should restore a windowed stack and lazily refresh out-of-window slots', async () => {
         const history1 = createMemoryHistory({initialEntries: ['/a']});
         const router1 = create(
           {
@@ -431,13 +583,12 @@ describe('Router', () => {
           (matched) =>
             Promise.resolve(`view2:${matched.at(-1)!.path}:${++count}`)
         );
-        // Slot 0 is a placeholder for the evicted entry.
-        router2.locationStack.length.should.equal(3);
-        (router2.locationStack[0] === undefined).should.be.true();
+        // The memory window is restored as-is, window-relative.
         router2.locationStack
-          .slice(1)
           .map((l) => l.pathname)
           .should.deepEqual(['/b', '/c']);
+        (router2 as any).baseIndex.should.equal(1);
+        router2.viewStack.length.should.equal(2);
 
         const views: string[] = [];
         listen(router2, (v) => views.push(v as string));
@@ -446,10 +597,9 @@ describe('Router', () => {
         count.should.equal(1);
 
         await initHistoryStack(router2);
-        // The placeholder slot stays unresolved.
+        // Every in-window entry was warmed.
         count.should.equal(3);
-        (router2.viewStack[0] === null).should.be.true();
-        router2.viewStack[1]!.should.equal('view2:/b:2');
+        router2.viewStack.should.deepEqual(['view2:/b:2', 'view2:/c:3']);
 
         // In-window back is warmed: zero new resolves.
         go(router2, -1);
@@ -458,12 +608,14 @@ describe('Router', () => {
         count.should.equal(3);
         views.at(-1)!.should.equal('view2:/b:2');
 
-        // Back onto the placeholder lazily refreshes the entry.
+        // Back onto the evicted(out-of-window) slot lazily refreshes
+        // the entry and restarts the window at the landed position.
         go(router2, -1);
         history2.location.pathname.should.equal('/a');
         await tick();
         count.should.equal(4);
         views.at(-1)!.should.equal('view2:/a:4');
+        (router2 as any).baseIndex.should.equal(0);
       });
 
       it('should degrade to a single-entry stack for legacy index-only state', () => {
@@ -479,10 +631,11 @@ describe('Router', () => {
           (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
         );
         // Legacy 1.x shape({index} without a window) is still accepted:
-        // the memory stack only holds the current entry, the view stack
-        // stays aligned with the absolute index.
+        // the memory window degrades to the current entry, aligned with
+        // the landed position, and the view stack stays window-relative.
         router.locationStack.map((l) => l.pathname).should.deepEqual(['/baz']);
-        router.viewStack.length.should.equal(3);
+        (router as any).baseIndex.should.equal(2);
+        router.viewStack.length.should.equal(1);
         router.viewStack.every((v) => v == null).should.be.true();
       });
     });
@@ -633,6 +786,67 @@ describe('Router', () => {
     it('should return an empty object for an empty array', () => {
       mergeMatchedParams([]).should.deepEqual({});
     });
+
+    it('should merge only up to `end` when given', () => {
+      const history = createMemoryHistory();
+      const router = create(
+        {
+          path: '',
+          children: [{path: '/users/:id', children: [{path: '/posts/:postId'}]}]
+        },
+        history,
+        () => Promise.resolve(null)
+      );
+      const matched = match(router, '/users/123/posts/456')!;
+      // Level 0 sees only its own params.
+      mergeMatchedParams(matched, 0).should.deepEqual({});
+      // Level 1 accumulates root + itself; the deeper postId must not
+      // leak into the shallower context.
+      mergeMatchedParams(matched, 1).should.deepEqual({id: '123'});
+      // The deepest level sees the full accumulation.
+      mergeMatchedParams(matched, 2).should.deepEqual({
+        id: '123',
+        postId: '456'
+      });
+    });
+
+    it('should keep the same-name override semantics within `end`', () => {
+      const history = createMemoryHistory();
+      const router = create(
+        {
+          path: '',
+          children: [{path: '/:id', children: [{path: '/posts/:id'}]}]
+        },
+        history,
+        () => Promise.resolve(null)
+      );
+      const matched = match(router, '/42/posts/99')!;
+      // Before the overriding level is included, the shallow value stays.
+      mergeMatchedParams(matched, 1).should.deepEqual({id: '42'});
+      mergeMatchedParams(matched, 2).should.deepEqual({id: '99'});
+    });
+
+    it('should merge every level when `end` is omitted (backward compatible)', () => {
+      const history = createMemoryHistory();
+      const router = create(
+        {
+          path: '',
+          children: [{path: '/users/:id', children: [{path: '/posts/:postId'}]}]
+        },
+        history,
+        () => Promise.resolve(null)
+      );
+      const matched = match(router, '/users/123/posts/456')!;
+      // A single-argument call keeps the 1.x all-levels merge.
+      mergeMatchedParams(matched).should.deepEqual(
+        mergeMatchedParams(matched, matched.length - 1)
+      );
+      // An out-of-range `end` degrades to the full merge as well.
+      mergeMatchedParams(matched, 99).should.deepEqual({
+        id: '123',
+        postId: '456'
+      });
+    });
   });
 
   describe('getParams', () => {
@@ -649,6 +863,676 @@ describe('Router', () => {
       return navigate(router, '/users/123/posts/456').then(() => {
         getParams(router).should.deepEqual({id: '123', postId: '456'});
       });
+    });
+
+    it('should return the parsed params of the current location on a param route', async () => {
+      const history = createMemoryHistory();
+      const router = create(
+        {path: '', children: [{path: '/users/:id'}]},
+        history,
+        () => Promise.resolve(null)
+      );
+      await navigate(router, '/users/123');
+      getParams(router).should.deepEqual({id: '123'});
+    });
+
+    it('should let deeper params override same-name shallow params', async () => {
+      const history = createMemoryHistory();
+      const router = create(
+        {
+          path: '',
+          children: [{path: '/:id', children: [{path: '/posts/:id'}]}]
+        },
+        history,
+        () => Promise.resolve(null)
+      );
+      await navigate(router, '/42/posts/99');
+      getParams(router).should.deepEqual({id: '99'});
+    });
+
+    it('should return an empty object when the current entry is outside the restored window', () => {
+      const history = createMemoryHistory({
+        initialEntries: [
+          {
+            pathname: '/users/5',
+            state: {
+              index: 0,
+              base: 2,
+              locationStack: [{pathname: '/a'}, {pathname: '/b'}]
+            }
+          }
+        ]
+      });
+      const router = create(
+        {
+          path: '',
+          children: [{path: '/users/:id'}, {path: '/a'}, {path: '/b'}]
+        },
+        history,
+        () => Promise.resolve(null)
+      );
+      // The landed entry(index 0) precedes the restored window(base 2),
+      // so its slot is out-of-window and reads as empty.
+      router.locationStack
+        .map((l) => l.pathname)
+        .should.deepEqual(['/a', '/b']);
+      (router as any).baseIndex.should.equal(2);
+      getParams(router).should.deepEqual({});
+    });
+
+    it('should return an empty object when the current path matches no route', () => {
+      const history = createMemoryHistory({initialEntries: ['/unknown']});
+      const router = create(
+        {path: '', children: [{path: '/users/:id'}]},
+        history,
+        () => Promise.resolve(null)
+      );
+      getParams(router).should.deepEqual({});
+    });
+  });
+
+  describe('route guards', () => {
+    const tick = () =>
+      new Promise((done) => {
+        setTimeout(done);
+      });
+
+    it('should follow a static redirect on navigate, committing the terminal location', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const resolveView = sinon.fake((matched: any[]) =>
+        Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const router = create(
+        {path: '', children: [{path: '/a', redirect: '/b'}, {path: '/b'}]},
+        history,
+        resolveView
+      );
+      await navigate(router, '/a', {id: 7});
+
+      history.location.pathname.should.equal('/b');
+      // Only the terminal target was resolved, never the redirecting route.
+      resolveView.callCount.should.equal(1);
+      resolveView.firstCall.args[0].at(-1).path.should.equal('/b');
+      getCurrentView(router).should.equal('view:/b');
+      // The stack holds the terminal location; the user state of the
+      // original navigation is carried through the redirect.
+      router.locationStack
+        .map((l) => l.pathname)
+        .should.deepEqual(['/a', '/b']);
+      (history.location.state as HistoryState).state.should.deepEqual({id: 7});
+    });
+
+    it('should redirect when beforeLoad returns a path', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const beforeLoad = sinon.fake.resolves('/b');
+      const router = create(
+        {path: '', children: [{path: '/a', beforeLoad}, {path: '/b'}]},
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      await navigate(router, '/a');
+
+      beforeLoad.callCount.should.equal(1);
+      history.location.pathname.should.equal('/b');
+      getCurrentView(router).should.equal('view:/b');
+    });
+
+    it('should follow a redirect chain and commit only the terminal entry', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const router = create(
+        {
+          path: '',
+          children: [
+            {path: '/a', redirect: '/b'},
+            {path: '/b', redirect: '/c'},
+            {path: '/c'}
+          ]
+        },
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      await navigate(router, '/a');
+
+      history.location.pathname.should.equal('/c');
+      getCurrentView(router).should.equal('view:/c');
+      // Intermediate targets are never committed to the session stack.
+      router.locationStack
+        .map((l) => l.pathname)
+        .should.deepEqual(['/a', '/c']);
+      (history.location.state as HistoryState)
+        .locationStack!.map((l) => l.pathname)
+        .should.deepEqual(['/a', '/c']);
+    });
+
+    it('should throw RedirectLoopError when redirects never settle', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const router = create(
+        {
+          path: '',
+          children: [
+            {path: '/a', redirect: '/b'},
+            {path: '/b', redirect: '/a'}
+          ]
+        },
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      let error: any;
+      try {
+        await navigate(router, '/a');
+      } catch (e) {
+        error = e;
+      }
+      Should(error).be.an.instanceOf(RedirectLoopError);
+      Should(error).be.an.instanceOf(NativeRouterError);
+      // Nothing was committed; the history stays on the initial entry.
+      history.location.pathname.should.equal('/a');
+      router.locationStack.length.should.equal(1);
+    });
+
+    it('should continue when beforeLoad returns undefined', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const beforeLoad = sinon.fake.resolves(undefined);
+      const router = create(
+        {path: '', children: [{path: '/a', beforeLoad}, {path: '/b'}]},
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      await navigate(router, '/a');
+
+      beforeLoad.callCount.should.equal(1);
+      history.location.pathname.should.equal('/a');
+      getCurrentView(router).should.equal('view:/a');
+    });
+
+    it('should pass params accumulated up to the current level to beforeLoad', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const seen: Record<string, string>[] = [];
+      const router = create(
+        {
+          path: '',
+          children: [
+            {
+              path: '/:section',
+              beforeLoad: ({params}) => {
+                seen.push({...params});
+              },
+              children: [
+                {
+                  path: '/detail/:section',
+                  beforeLoad: ({params}) => {
+                    seen.push({...params});
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      await navigate(router, '/users/detail/posts');
+
+      // The shallow guard sees only its own params; the deep guard sees
+      // the accumulation with the same-name param overridden.
+      seen.should.deepEqual([{section: 'users'}, {section: 'posts'}]);
+    });
+
+    it('should replace the current entry with the terminal location when refresh redirects', async () => {
+      const history = createMemoryHistory({
+        initialEntries: [{pathname: '/a', state: {index: 0}}]
+      });
+      const router = create(
+        {path: '', children: [{path: '/a', redirect: '/b'}, {path: '/b'}]},
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      await refresh(router);
+
+      history.location.pathname.should.equal('/b');
+      // The replace keeps the index.
+      (history.location.state as HistoryState).index.should.equal(0);
+      router.locationStack.map((l) => l.pathname).should.deepEqual(['/b']);
+      getCurrentView(router).should.equal('view:/b');
+    });
+
+    it('should keep the NotFoundError behavior for unmatched paths', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const router = create(
+        {path: '', children: [{path: '/a'}]},
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      let error: any;
+      try {
+        await navigate(router, '/missing');
+      } catch (e) {
+        error = e;
+      }
+      Should(error).be.an.instanceOf(NotFoundError);
+      // Nothing was committed for a failed resolve.
+      history.location.pathname.should.equal('/a');
+    });
+
+    it('should not run guards in resolve — stack locations are already terminal', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const resolveView = sinon.fake((matched: any[]) =>
+        Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const router = create(
+        {path: '', children: [{path: '/a', redirect: '/b'}, {path: '/b'}]},
+        history,
+        resolveView
+      );
+      // resolve()/resolveTo() bypass the guards: they resolve whatever
+      // route matches the given location as-is.
+      (await resolveTo(router, '/a')).should.equal('view:/a');
+      await initHistoryStack(router);
+      resolveView.callCount.should.equal(2);
+      router.viewStack[0].should.equal('view:/a');
+      history.location.pathname.should.equal('/a');
+    });
+
+    it('should redirect a deep-linked entry through the lazy refresh of listen', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const router = create(
+        {path: '', children: [{path: '/a', redirect: '/b'}, {path: '/b'}]},
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      listen(router, () => undefined);
+      await tick();
+
+      // The initial lazy refresh followed the redirect and settled on
+      // the terminal entry without looping.
+      history.location.pathname.should.equal('/b');
+      (history.location.state as HistoryState).index.should.equal(0);
+      getCurrentView(router).should.equal('view:/b');
+    });
+
+    it('should let the last-started navigation win while slow guards are pending', async () => {
+      const history = createMemoryHistory();
+      const router = create(
+        {
+          path: '',
+          children: [
+            {
+              path: '/slow',
+              async beforeLoad() {
+                await tick();
+                await tick();
+              }
+            },
+            {path: '/fast'}
+          ]
+        },
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+
+      // The slow navigation never settles(superseded chains park forever);
+      // only await the fast one, then let the slow guards finish.
+      navigate(router, '/slow').catch(() => undefined);
+      await navigate(router, '/fast');
+      await tick();
+      await tick();
+
+      history.location.pathname.should.equal('/fast');
+      getCurrentView(router).should.equal('view:/fast');
+    });
+
+    it('should cancel a navigation whose guards are still pending', async () => {
+      const beforeLoad = sinon.fake(async () => {
+        await tick();
+        await tick();
+      });
+      const history = createMemoryHistory({initialEntries: ['/']});
+      const router = create(
+        {path: '', children: [{path: '/'}, {path: '/guarded', beforeLoad}]},
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+
+      navigate(router, '/guarded').catch(() => undefined);
+      cancel(router);
+      await tick();
+      await tick();
+
+      // The guard ran out, but the navigation was cancelled before it:
+      // nothing was committed.
+      beforeLoad.callCount.should.equal(1);
+      history.location.pathname.should.equal('/');
+      Should(getCurrentView(router)).be.null();
+    });
+
+    it('should report pending loading while guards are still running', async () => {
+      const statuses: (string | undefined)[] = [];
+      const history = createMemoryHistory({initialEntries: ['/']});
+      const router = create(
+        {
+          path: '',
+          children: [
+            {path: '/'},
+            {
+              path: '/guarded',
+              async beforeLoad() {
+                await tick();
+              }
+            }
+          ]
+        },
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`),
+        {onLoadingChange: (status) => statuses.push(status)}
+      );
+
+      const task = navigate(router, '/guarded');
+      // The pending status is reported from the start of the guard
+      // phase, not only once the view task begins.
+      statuses.should.deepEqual(['pending']);
+      await task;
+      statuses.should.deepEqual(['pending', 'resolved']);
+    });
+  });
+
+  describe('preload', () => {
+    it('should deduplicate concurrent preloads of the same target', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const resolveView = sinon.fake((matched: any[]) =>
+        Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const router = create(
+        {path: '', children: [{path: '/a'}, {path: '/b'}]},
+        history,
+        resolveView
+      );
+
+      // Both callers share one in-flight resolution...
+      const [e1, e2] = await Promise.all([
+        preload(router, '/b'),
+        preload(router, '/b')
+      ]);
+      resolveView.callCount.should.equal(1);
+      (e1 === e2).should.be.true();
+      (await e1.task).should.equal('view:/b');
+
+      // ...and a later call within the TTL reuses the cached entry.
+      (await preload(router, '/b')).task.should.equal(e1.task);
+      resolveView.callCount.should.equal(1);
+    });
+
+    it('should re-resolve the target after the ttl expires', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const resolveView = sinon.fake((matched: any[]) =>
+        Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const router = create(
+        {path: '', children: [{path: '/a'}, {path: '/b'}]},
+        history,
+        resolveView
+      );
+
+      await preload(router, '/b', {ttl: 1});
+      resolveView.callCount.should.equal(1);
+
+      await new Promise((done) => {
+        setTimeout(done, 5);
+      });
+      await preload(router, '/b', {ttl: 1});
+      resolveView.callCount.should.equal(2);
+    });
+
+    it('should evict a rejected resolution so the next call retries', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      let fail = true;
+      const beforeLoad = sinon.fake(() => {
+        if (fail) throw new Error('guard boom');
+        return undefined;
+      });
+      const resolveView = sinon.fake((matched: any[]) =>
+        Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const router = create(
+        {
+          path: '',
+          children: [{path: '/a'}, {path: '/b', beforeLoad}]
+        },
+        history,
+        resolveView
+      );
+
+      let error: any;
+      try {
+        await preload(router, '/b');
+      } catch (e) {
+        error = e;
+      }
+      Should(error).be.an.Error();
+      error.message.should.equal('guard boom');
+
+      fail = false;
+      const entry = await preload(router, '/b');
+      beforeLoad.callCount.should.equal(2);
+      resolveView.callCount.should.equal(1);
+      (await entry.task).should.equal('view:/b');
+    });
+
+    it('should invalidate the cached entry once it is committed', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const resolveView = sinon.fake((matched: any[]) =>
+        Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const router = create(
+        {path: '', children: [{path: '/a'}, {path: '/b'}]},
+        history,
+        resolveView
+      );
+
+      const entry = await preload(router, '/b');
+      resolveView.callCount.should.equal(1);
+
+      // The push consumes the entry and evicts its cache slot.
+      await commit(router, entry.task, entry.location);
+      const pushed = await preload(router, '/b');
+      resolveView.callCount.should.equal(2);
+      pushed.should.not.equal(entry);
+
+      // A replace commit evicts the slot as well.
+      await commitReplace(router, pushed.task, pushed.location);
+      await preload(router, '/b');
+      resolveView.callCount.should.equal(3);
+    });
+
+    it('should prune expired records of other targets on every write', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const router = create(
+        {path: '', children: [{path: '/a'}, {path: '/b'}]},
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+
+      await preload(router, '/a', {ttl: 1});
+      await new Promise((done) => {
+        setTimeout(done, 5);
+      });
+
+      // Writing /b sweeps the dead /a record instead of letting the
+      // cache grow unboundedly across distinct prefetched targets.
+      await preload(router, '/b');
+      const cache = (router as any).preloadCache as Map<string, unknown>;
+      cache.size.should.equal(1);
+      cache.has('/a').should.be.false();
+    });
+
+    it('should evict the pre-redirect key when the terminal target is committed', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const router = create(
+        {path: '', children: [{path: '/a', redirect: '/b'}, {path: '/b'}]},
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+
+      // Cached under the pre-redirect key /a, terminal location /b.
+      const entry = await preload(router, '/a');
+      entry.location.pathname.should.equal('/b');
+      const cache = (router as any).preloadCache as Map<string, unknown>;
+      cache.size.should.equal(1);
+
+      // Committing the terminal entry also drops the /a record.
+      await commit(router, entry.task, entry.location);
+      cache.size.should.equal(0);
+    });
+  });
+
+  describe('bounded memory stack', () => {
+    const routes = {
+      path: '',
+      children: [
+        {path: '/a'},
+        {path: '/b'},
+        {path: '/c'},
+        {path: '/d'},
+        {path: '/e/:id'}
+      ]
+    };
+
+    it('should evict the oldest entries and keep window-relative accessors correct', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const router = create(
+        routes,
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`),
+        {maxStackDepth: 3}
+      );
+      // Five entries in the session: /a plus four navigations.
+      await navigate(router, '/b');
+      await navigate(router, '/c');
+      await navigate(router, '/d');
+      await navigate(router, '/e/7');
+
+      // The memory window is bounded and matches the serialized one.
+      router.locationStack.length.should.equal(3);
+      router.locationStack
+        .map((l) => l.pathname)
+        .should.deepEqual(['/c', '/d', '/e/7']);
+      (router as any).baseIndex.should.equal(2);
+      const state = history.location.state as HistoryState;
+      state.index.should.equal(4);
+      state.base!.should.equal(2);
+      state
+        .locationStack!.map((l) => l.pathname)
+        .should.deepEqual(['/c', '/d', '/e/7']);
+
+      // Window-relative accessors stay correct after the eviction.
+      getCurrentView(router).should.equal('view:/e/7');
+      getParams(router).should.deepEqual({id: '7'});
+    });
+
+    it('should lazily refresh when POPping outside the window without crashing', async () => {
+      const tick = () =>
+        new Promise((done) => {
+          setTimeout(done);
+        });
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      let count = 0;
+      const resolveView = sinon.fake((matched: any[]) =>
+        Promise.resolve(`view:${matched.at(-1)!.path}:${++count}`)
+      );
+      const router = create(routes, history, resolveView, {
+        maxStackDepth: 3
+      });
+      const views: string[] = [];
+      listen(router, (v) => views.push(v as string));
+      await tick();
+      await navigate(router, '/b');
+      await navigate(router, '/c');
+      await navigate(router, '/d');
+      await navigate(router, '/e/7');
+      resolveView.callCount.should.equal(5);
+      // The window covers absolute indices 2..4.
+      (router as any).baseIndex.should.equal(2);
+
+      // /b sits at absolute index 1, before the window.
+      go(router, -3);
+      history.location.pathname.should.equal('/b');
+      await tick();
+      // The out-of-window slot lazily refreshed and re-rendered.
+      resolveView.callCount.should.equal(6);
+      views.at(-1)!.should.equal('view:/b:6');
+      getCurrentView(router).should.equal('view:/b:6');
+      // The window restarted at the landed position.
+      router.locationStack.map((l) => l.pathname).should.deepEqual(['/b']);
+      (router as any).baseIndex.should.equal(1);
+      (history.location.state as HistoryState).index.should.equal(1);
+    });
+
+    it('should restore the bounded window and base after a refresh', async () => {
+      const history1 = createMemoryHistory({initialEntries: ['/a']});
+      const router1 = create(
+        routes,
+        history1,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`),
+        {maxStackDepth: 3}
+      );
+      const states: any[] = [];
+      await navigate(router1, '/b');
+      states.push(history1.location.state);
+      await navigate(router1, '/c');
+      states.push(history1.location.state);
+      await navigate(router1, '/d');
+      states.push(history1.location.state);
+      await navigate(router1, '/e/7');
+      states.push(history1.location.state);
+
+      // Simulate a refresh on the last entry: the landed entry carries
+      // its serialized window.
+      const history2 = createMemoryHistory({
+        initialEntries: [
+          '/a',
+          {pathname: '/b', state: states[0]},
+          {pathname: '/c', state: states[1]},
+          {pathname: '/d', state: states[2]},
+          {pathname: '/e/7', state: states[3]}
+        ]
+      });
+      let count = 0;
+      const resolveView = sinon.fake((matched: any[]) =>
+        Promise.resolve(`view2:${matched.at(-1)!.path}:${++count}`)
+      );
+      const router2 = create(routes, history2, resolveView, {
+        maxStackDepth: 3
+      });
+
+      // The restored memory window is consistent with its base offset.
+      router2.locationStack
+        .map((l) => l.pathname)
+        .should.deepEqual(['/c', '/d', '/e/7']);
+      (router2 as any).baseIndex.should.equal(2);
+      router2.viewStack.length.should.equal(3);
+
+      const views: string[] = [];
+      listen(router2, (v) => views.push(v as string));
+      await new Promise((done) => {
+        setTimeout(done);
+      });
+      // listen()'s initial lazy refresh of the current entry.
+      resolveView.callCount.should.equal(1);
+      getCurrentView(router2).should.equal('view2:/e/7:1');
+      getParams(router2).should.deepEqual({id: '7'});
+
+      // In-window back lands on the warmed-by-refresh slots lazily but
+      // without leaving the window.
+      go(router2, -1);
+      history2.location.pathname.should.equal('/d');
+      await new Promise((done) => {
+        setTimeout(done);
+      });
+      resolveView.callCount.should.equal(2);
+      views.at(-1)!.should.equal('view2:/d:2');
+      (router2 as any).baseIndex.should.equal(2);
+      router2.locationStack
+        .map((l) => l.pathname)
+        .should.deepEqual(['/c', '/d', '/e/7']);
     });
   });
 });
