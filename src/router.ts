@@ -219,7 +219,7 @@ export function match<R extends BaseRoute = BaseRoute>(
       const end = !route.children;
       const matched = route.path
         ? createMatcher<Record<string, string>>(route.path, {
-            strict: true,
+            trailing: false,
             sensitive: true,
             decode:
               typeof decodeURIComponent === 'function'
@@ -851,9 +851,10 @@ export function mergeMatchedParams<R extends BaseRoute = BaseRoute>(
 ): Record<string, string> {
   return matched
     .slice(0, end === undefined ? matched.length : end + 1)
-    .reduce<
-      Record<string, string>
-    >((params, {params: levelParams}) => ({...params, ...levelParams}), {});
+    .reduce<Record<string, string>>(
+      (params, {params: levelParams}) => ({...params, ...levelParams}),
+      {}
+    );
 }
 
 /**
