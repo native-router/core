@@ -23,11 +23,13 @@ import {
   preload,
   mergeMatchedParams
 } from '../src/router';
-import type {HistoryState} from '../src/types';
+import type {BaseRoute, HistoryState, StandardSchemaV1} from '../src/types';
+import {parseSearch, parseSearchInput, parseSearchSync} from '../src/search';
 import {
   NativeRouterError,
   NotFoundError,
-  RedirectLoopError
+  RedirectLoopError,
+  SearchError
 } from '../src/errors';
 
 describe('Router', () => {
@@ -1534,5 +1536,142 @@ describe('Router', () => {
         .map((l) => l.pathname)
         .should.deepEqual(['/c', '/d', '/e/7']);
     });
+  });
+});
+
+describe('search', () => {
+  /** Minimal Standard Schema fixture: coerces `page` into a positive integer. */
+  const pageSchema: StandardSchemaV1<unknown, {page: number}> = {
+    '~standard': {
+      version: 1,
+      vendor: 'test',
+      validate(value) {
+        const {page} = value as {page?: unknown};
+        const parsed = Number(page);
+        return Number.isInteger(parsed) && parsed >= 1
+          ? {value: {page: parsed}}
+          : {
+              issues: [{message: 'expected a positive integer', path: ['page']}]
+            };
+      }
+    }
+  };
+
+  /** Same validator behind an async `validate`, as valibot async would be. */
+  const asyncSchema: StandardSchemaV1<unknown, {page: number}> = {
+    '~standard': {
+      version: 1,
+      vendor: 'test',
+      validate: (value) =>
+        Promise.resolve(pageSchema['~standard'].validate(value))
+    }
+  };
+
+  it('should degrade a search string into the plain input object', () => {
+    parseSearchInput('?page=2&tag=a&tag=b').should.deepEqual({
+      page: '2',
+      tag: ['a', 'b']
+    });
+    parseSearchInput('page=2').should.deepEqual({page: '2'});
+    parseSearchInput('').should.deepEqual({});
+    parseSearchInput('flag').should.deepEqual({flag: ''});
+  });
+
+  it('should parse a valid search with the schema, sync or async', async () => {
+    (await parseSearch(pageSchema, '?page=2')).should.deepEqual({page: 2});
+    (await parseSearch(asyncSchema, 'page=3')).should.deepEqual({page: 3});
+  });
+
+  it('should reject with SearchError carrying the issues', async () => {
+    let error: any;
+    try {
+      await parseSearch(pageSchema, '?page=abc');
+    } catch (e) {
+      error = e;
+    }
+    Should(error).be.an.instanceOf(SearchError);
+    Should(error).be.an.instanceOf(NativeRouterError);
+    error.message.should.equal(
+      'Invalid search params "?page=abc": page: expected a positive integer'
+    );
+    error.search.should.equal('?page=abc');
+    error.issues.should.deepEqual([
+      {message: 'expected a positive integer', path: ['page']}
+    ]);
+  });
+
+  it('should format issue paths of every shape', async () => {
+    const schema: StandardSchemaV1 = {
+      '~standard': {
+        version: 1,
+        vendor: 'test',
+        validate: () => ({
+          issues: [
+            {message: 'invalid filter', path: [{key: 'filter'}, {key: 0}]},
+            {message: 'missing param'}, // no path at all
+            {message: 'empty path', path: []}
+          ]
+        })
+      }
+    };
+    let error: any;
+    try {
+      await parseSearch(schema, '?filter=x');
+    } catch (e) {
+      error = e;
+    }
+    error.message.should.equal(
+      'Invalid search params "?filter=x": filter.0: invalid filter; ' +
+        'missing param; empty path'
+    );
+  });
+
+  it('should parse synchronously and reject async schemas', () => {
+    parseSearchSync(pageSchema, '?page=7').should.deepEqual({page: 7});
+    let error: any;
+    try {
+      parseSearchSync(asyncSchema, '?page=7');
+    } catch (e) {
+      error = e;
+    }
+    Should(error).be.an.Error();
+    error.message.should.containEql('asynchronously');
+  });
+
+  it('should pass route search schemas to the resolveView untouched', async () => {
+    const history = createMemoryHistory({initialEntries: ['/']});
+    // Typed as `BaseRoute[]` so `route.search` resolves on every level.
+    const routes: BaseRoute[] = [
+      {path: '', children: [{path: '/list', search: pageSchema}]}
+    ];
+    const router = create(
+      routes,
+      history,
+      // A framework's resolveView consumes `route.search` itself: parse
+      // the location search and resolve the parsed output as the view.
+      async (matched, {location}) =>
+        parseSearchSync(matched.at(-1)!.route.search!, location.search)
+    );
+    await navigate(router, '/list?page=4');
+    getCurrentView(router).should.deepEqual({page: 4});
+  });
+
+  it('should let search validation failures ride the errorHandler channel', async () => {
+    const history = createMemoryHistory({initialEntries: ['/']});
+    const routes: BaseRoute[] = [
+      {path: '', children: [{path: '/list', search: pageSchema}]}
+    ];
+    const router = create(
+      routes,
+      history,
+      async (matched, {location}) =>
+        parseSearchSync(matched.at(-1)!.route.search!, location.search),
+      {
+        errorHandler: (e) =>
+          `fallback:${e instanceof SearchError ? e.issues[0].message : e}`
+      }
+    );
+    await navigate(router, '/list?page=0');
+    getCurrentView(router).should.equal('fallback:expected a positive integer');
   });
 });

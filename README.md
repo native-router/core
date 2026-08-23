@@ -59,9 +59,10 @@ commit(router, entry.task, entry.location); // commit like a click
 - Route guards: static `redirect` and async `beforeLoad` on every route level, run shallow → deep; more than 10 chained redirects reject with `RedirectLoopError`
 - Cancelable async navigation: a new resolve supersedes the in-flight one (`currentGuard`); `cancel()` aborts it; a history POP cancels it too. A superseded or cancelled `navigate()` promise **never settles** — don't `await` a navigation that might be superseded
 - Navigation API: `navigate`, `refresh`, `go`/`forward`/`back`, `commit`/`commitReplace`, `createHref`, `getParams`, `match`, `toLocation`, `resolve`, `resolveTo`
+- Search validation via [Standard Schema](https://standardschema.dev): a `search` schema on any route level (zod/valibot/arktype, no hard dependency), parsed with `parseSearch`/`parseSearchSync`; failures throw `SearchError`
 - `preload(router, to, {ttl})`: resolve a target through the guards ahead of time, sharing one task across concurrent callers (in-flight dedup) with a TTL, default 30s; consumed entries are dropped on commit
 - `errorHandler` hook turns resolve failures into fallback views
-- Errors: `NativeRouterError`, `NotFoundError`, `RedirectLoopError`
+- Errors: `NativeRouterError`, `NotFoundError`, `RedirectLoopError`, `SearchError`
 - Tree-shakable: `sideEffects: false`
 
 ## Matching semantics
@@ -72,6 +73,30 @@ commit(router, entry.task, entry.location); // commit like a click
 - **Trailing slashes are significant**: `/users/` does not match `/users`.
 - Matching is **case-sensitive**.
 - Params of nested levels are merged **deep over shallow** (`mergeMatchedParams`): for `/:id` + `/posts/:id`, the deeper `id` wins.
+
+## Search validation
+
+Declare a `search` validator on a route level and parse `location.search` with it in your `resolveView`. Any [Standard Schema](https://standardschema.dev) validator works — zod, valibot and arktype all implement the interface — so the core keeps zero extra runtime dependencies.
+
+```ts
+import {create, parseSearch} from '@native-router/core';
+import {z} from 'zod';
+
+const listSearch = z.object({page: z.coerce.number().default(1)});
+
+const router = create(
+  {path: '', children: [{path: '/list', search: listSearch}]},
+  createBrowserHistory(),
+  // Your resolveView consumes route.search itself: parse the location
+  // search, then resolve the view from the parsed output
+  async (matched, {location}) =>
+    renderList(await parseSearch(matched.at(-1)!.route.search!, location.search))
+);
+```
+
+- `parseSearchInput(search)` degrades a query string into a plain object — single-valued keys are strings, keys repeated in the query are arrays — which is also the input every schema validates
+- `parseSearch(schema, search)` resolves the schema output (async validators are awaited); `parseSearchSync` is the render/guard-time flavor and rejects async validators with a clear error
+- A rejected validation throws `SearchError` (a `NativeRouterError`) carrying the raw `search` and the reported `issues` — route it through your `errorHandler` like any other resolve failure
 
 ## Install
 

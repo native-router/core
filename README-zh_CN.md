@@ -59,9 +59,10 @@ commit(router, entry.task, entry.location); // 像点击一样提交
 - 路由守卫：每层路由支持静态 `redirect` 与异步 `beforeLoad`，按浅层到深层执行；连续重定向超过 10 次以 `RedirectLoopError` 拒绝
 - 可取消的异步导航：新的解析取代进行中的解析（`currentGuard`）；`cancel()` 主动中止；history POP 也会取消。被取代或被取消的 `navigate()` 返回的 promise **永远不会 settle**——不要 `await` 可能被取代的导航
 - 导航 API：`navigate`、`refresh`、`go`/`forward`/`back`、`commit`/`commitReplace`、`createHref`、`getParams`、`match`、`toLocation`、`resolve`、`resolveTo`
+- 基于 [Standard Schema](https://standardschema.dev) 的 search 校验：任意路由层可声明 `search` 校验器（zod/valibot/arktype，无硬依赖），用 `parseSearch`/`parseSearchSync` 解析；失败抛出 `SearchError`
 - `preload(router, to, {ttl})`：提前经守卫解析目标，并发调用共享同一任务（in-flight 去重）并带 TTL（默认 30 秒）；commit 消费后即失效
 - `errorHandler` 钩子把解析失败转换为兜底视图
-- 错误类型：`NativeRouterError`、`NotFoundError`、`RedirectLoopError`
+- 错误类型：`NativeRouterError`、`NotFoundError`、`RedirectLoopError`、`SearchError`
 - Tree-Shaking 友好：`sideEffects: false`
 
 ## 匹配语义
@@ -72,6 +73,30 @@ commit(router, entry.task, entry.location); // 像点击一样提交
 - **尾部斜杠敏感**：`/users/` 不会匹配 `/users`。
 - 匹配**区分大小写**。
 - 嵌套层级的参数**深层覆盖浅层**合并（`mergeMatchedParams`）：`/:id` + `/posts/:id` 时深层的 `id` 生效。
+
+## Search 校验
+
+在路由层上声明 `search` 校验器，并在你的 `resolveView` 里解析 `location.search`。任何 [Standard Schema](https://standardschema.dev) 校验器都可用——zod、valibot、arktype 均实现了该接口——内核因此保持零新增运行时依赖。
+
+```ts
+import {create, parseSearch} from '@native-router/core';
+import {z} from 'zod';
+
+const listSearch = z.object({page: z.coerce.number().default(1)});
+
+const router = create(
+  {path: '', children: [{path: '/list', search: listSearch}]},
+  createBrowserHistory(),
+  // 你的 resolveView 自行消费 route.search：先解析 location.search，
+  // 再用解析结果渲染视图
+  async (matched, {location}) =>
+    renderList(await parseSearch(matched.at(-1)!.route.search!, location.search))
+);
+```
+
+- `parseSearchInput(search)` 把查询串退化为普通对象——单值键是字符串，查询串中重复的键是数组——它同时也是所有 schema 校验的输入
+- `parseSearch(schema, search)` 解析出 schema 输出（异步校验器会被 await）；`parseSearchSync` 是渲染/守卫时机的同步版本，遇到异步校验器会抛出明确的错误
+- 校验不通过抛出 `SearchError`（`NativeRouterError` 的子类），携带原始 `search` 与 schema 报告的 `issues`——像其他解析失败一样交给 `errorHandler` 处理
 
 ## 安装
 

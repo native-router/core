@@ -26,6 +26,77 @@ export type WrappedLocation = Location<HistoryState>;
 export type Awaitable<T> = T | Promise<T>;
 
 /**
+ * The [Standard Schema](https://standardschema.dev) interface, version 1 —
+ * the common validation interface implemented by zod, valibot and arktype.
+ *
+ * Inlined type-only from `@standard-schema/spec` so the core keeps zero
+ * extra runtime dependencies: any schema exposing `~standard` works.
+ * @group Types
+ * @category Route
+ */
+export interface StandardSchemaV1<Input = unknown, Output = Input> {
+  readonly '~standard': StandardSchemaV1.Props<Input, Output>;
+}
+
+/* eslint-disable no-use-before-define -- namespace members reference siblings defined below, verbatim from @standard-schema/spec */
+export declare namespace StandardSchemaV1 {
+  export interface Props<Input = unknown, Output = Input> {
+    /** The version number of the standard. */
+    readonly version: 1;
+    /** The vendor name of the schema library. */
+    readonly vendor: string;
+    /** Validates unknown input values. */
+    readonly validate: (
+      value: unknown
+    ) => Result<Output> | Promise<Result<Output>>;
+  }
+
+  export type Result<Output> = SuccessResult<Output> | FailureResult;
+
+  export interface SuccessResult<Output> {
+    /** The typed output value. */
+    readonly value: Output;
+    /** The issues of the input value. */
+    readonly issues?: undefined;
+  }
+
+  export interface FailureResult {
+    /** The issues of the input value. */
+    readonly issues: ReadonlyArray<Issue>;
+  }
+
+  export interface Issue {
+    /** The issue message. */
+    readonly message: string;
+    /** The issue path. */
+    readonly path?: ReadonlyArray<PropertyKey | PathSegment>;
+  }
+
+  export interface PathSegment {
+    /** The key of the path segment. */
+    readonly key: PropertyKey;
+  }
+}
+/* eslint-enable no-use-before-define */
+
+/**
+ * The plain input object a search string degrades into before schema
+ * validation: single-valued keys are strings, keys repeated in the query
+ * string are arrays of their values.
+ * @group Types
+ * @category Route
+ */
+export type SearchInput = Record<string, string | string[]>;
+
+/**
+ * Parsed output type of a {@link StandardSchemaV1 search schema}.
+ * @group Types
+ * @category Route
+ */
+export type SearchOutputOf<S> =
+  S extends StandardSchemaV1<any, infer Output> ? Output : never;
+
+/**
  * Params contributed by a single path segment: `:name` is required,
  * `:name?` is optional, anything else(static or wildcard) contributes
  * nothing.
@@ -81,6 +152,14 @@ export type BaseRoute<T = any> = {
    * redirected to the target path before the view resolves.
    */
   redirect?: string;
+  /**
+   * Optional Standard Schema(zod/valibot/arktype, ...) validator of the
+   * route search. Frameworks parse `location.search` with it at resolve
+   * time(see `parseSearch`) and inject the parsed output into their data
+   * contexts; a validation failure fails the resolve like any other
+   * navigation error.
+   */
+  search?: StandardSchemaV1;
   /**
    * Route guard invoked before the view resolves. Return a path string
    * to redirect, or nothing(`undefined`) to continue.
