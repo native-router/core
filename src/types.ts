@@ -254,6 +254,13 @@ export type GuardContext<R extends BaseRoute = BaseRoute> = {
   router: RouterInstance<R>;
   location: Location;
   params: Record<string, string>;
+  /**
+   * Aborted when this navigation is superseded by a newer one or
+   * cancelled(see {@link RouterInstance.cancelAll cancel}); pass it to
+   * the guard's requests(e.g. `fetch(url, {signal})`) so a discarded
+   * navigation stops consuming the network.
+   */
+  signal: AbortSignal;
 };
 
 export type BaseRoute<T = any> = {
@@ -287,6 +294,12 @@ export type ResolveViewContext<R extends BaseRoute> = {
   // eslint-disable-next-line no-use-before-define
   router: RouterInstance<R>;
   location: Location;
+  /**
+   * The navigation chain's abort signal: aborted when this navigation is
+   * superseded by a newer one or cancelled. Frameworks forward it into
+   * their data contexts so loaders can abort their requests.
+   */
+  signal: AbortSignal;
 };
 export type ResolveView<R extends BaseRoute, V> = (
   matched: Matched<R>[],

@@ -155,6 +155,72 @@ describe('Router', () => {
         'resolved'
       ]);
     });
+
+    it('should abort the superseded navigation chain but not the new one', async () => {
+      const signals: [string, AbortSignal][] = [];
+      const park = new Promise<undefined>(() => {});
+      const history = createMemoryHistory({initialEntries: ['/']});
+      const router = create(
+        {
+          path: '',
+          children: [
+            {path: '/'},
+            {
+              path: '/a',
+              beforeLoad({signal}) {
+                signals.push(['guard:/a', signal]);
+                // Slow guard: never settles on its own.
+                return park;
+              }
+            },
+            {
+              path: '/b',
+              beforeLoad({signal}) {
+                signals.push(['guard:/b', signal]);
+              }
+            }
+          ]
+        },
+        history,
+        (matched, {signal}) => {
+          signals.push([`view:${matched.at(-1)!.path}`, signal]);
+          return Promise.resolve(`view:${matched.at(-1)!.path}`);
+        }
+      );
+
+      // The parked chain of /a is superseded by /b.
+      navigate(router, '/a').catch(() => undefined);
+      await navigate(router, '/b');
+
+      const byName = (name: string) => signals.find(([n]) => n === name)![1];
+      // Aborting is synchronous with the superseding navigation.
+      byName('guard:/a').aborted.should.be.true();
+      // The new chain's guard and view signals stay live.
+      byName('guard:/b').aborted.should.be.false();
+      byName('view:/b').aborted.should.be.false();
+      history.location.pathname.should.equal('/b');
+    });
+
+    it('should not abort the signal of an already settled navigation', async () => {
+      const viewSignals: AbortSignal[] = [];
+      const history = createMemoryHistory({initialEntries: ['/']});
+      const router = create(
+        {path: '', children: [{path: '/a'}, {path: '/b'}]},
+        history,
+        (matched, {signal}) => {
+          viewSignals.push(signal);
+          return Promise.resolve(`view:${matched.at(-1)!.path}`);
+        }
+      );
+
+      await navigate(router, '/a');
+      await navigate(router, '/b');
+      // The superseded chain had already committed: its contexts must not
+      // report a bogus `aborted` after the fact.
+      viewSignals.should.have.length(2);
+      viewSignals[0]!.aborted.should.be.false();
+      viewSignals[1]!.aborted.should.be.false();
+    });
   });
 
   describe('refresh', () => {
@@ -250,6 +316,45 @@ describe('Router', () => {
       // (undefined status) for the dead resolve.
       await navigate(router, '/');
       statuses.should.deepEqual(['pending', undefined, 'pending', 'resolved']);
+    });
+
+    it('should abort the in-flight chain signal of guards and view loaders', async () => {
+      const guardSignals: AbortSignal[] = [];
+      const viewSignals: AbortSignal[] = [];
+      const park = new Promise<undefined>(() => {});
+      const history = createMemoryHistory({initialEntries: ['/']});
+      const router = create(
+        {
+          path: '',
+          children: [
+            {path: '/'},
+            {
+              path: '/guarded',
+              beforeLoad({signal}) {
+                guardSignals.push(signal);
+                return park;
+              }
+            }
+          ]
+        },
+        history,
+        (matched, {signal}) => {
+          viewSignals.push(signal);
+          return Promise.resolve(`view:${matched.at(-1)!.path}`);
+        }
+      );
+
+      // navigate() only starts the chain; the guard runs on the next
+      // microtask(await resume) of the async resolveEntry.
+      navigate(router, '/guarded').catch(() => undefined);
+      await Promise.resolve();
+      cancel(router);
+      guardSignals[0]!.aborted.should.be.true();
+
+      // A later navigation gets a fresh, live signal.
+      await navigate(router, '/');
+      guardSignals.should.have.length(1);
+      viewSignals[0]!.aborted.should.be.false();
     });
   });
 
@@ -1430,6 +1535,44 @@ describe('Router', () => {
       // Committing the terminal entry also drops the /a record.
       await commit(router, entry.task, entry.location);
       cache.size.should.equal(0);
+    });
+
+    it('should hand preload signals that a later navigation never aborts', async () => {
+      const signals: AbortSignal[] = [];
+      const park = new Promise<undefined>(() => {});
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const router = create(
+        {
+          path: '',
+          children: [
+            {path: '/a'},
+            {
+              path: '/slow',
+              beforeLoad({signal}) {
+                signals.push(signal);
+                return park;
+              }
+            },
+            {path: '/b'}
+          ]
+        },
+        history,
+        (matched, {signal}) => {
+          signals.push(signal);
+          return Promise.resolve(`view:${matched.at(-1)!.path}`);
+        }
+      );
+
+      // The preload's guards/loaders run under their own never-aborting
+      // signal: its entry promise may be shared by several consumers, so
+      // aborting it on behalf of one navigation is not sound.
+      preload(router, '/slow');
+      await navigate(router, '/b');
+      signals.forEach((signal) => signal.aborted.should.be.false());
+
+      // The navigation landed on /b; the parked preload stays pending
+      // under its live signal, available to a later consumer.
+      history.location.pathname.should.equal('/b');
     });
   });
 

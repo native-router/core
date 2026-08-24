@@ -53,10 +53,15 @@ type PreloadCacheEntry<V> = {
  *   `history index - baseIndex`; entries whose slot falls outside the
  *   memory window re-resolve lazily when landed on.
  * - `preloadCache`: router-level cache of {@link preload} results.
+ * - `resolvingController`: the in-flight chain's AbortController. It is
+ *   aborted(supersede/cancel) only while the chain is in flight; a
+ *   settled chain's controller is left alone so its contexts never
+ *   report `aborted` for a navigation that actually committed.
  */
 type RouterCore<R extends BaseRoute, V = any> = RouterInstance<R, V> & {
   baseIndex: number;
   preloadCache?: Map<string, PreloadCacheEntry<V>>;
+  resolvingController?: AbortController;
 };
 
 /**
@@ -295,7 +300,13 @@ export function resolve<R extends BaseRoute = BaseRoute, V = any>(
   const {resolveView, errorHandler} = router;
   return (
     matched
-      ? resolveView(matched, {router, location})
+      ? resolveView(matched, {
+          router,
+          location,
+          // One-shot resolves(warm-up, direct calls) are never superseded
+          // or cancelled: their loaders get a signal that never aborts.
+          signal: new AbortController().signal
+        })
       : Promise.reject(new NotFoundError(location.pathname))
   ).catch(errorHandler);
 }
@@ -327,22 +338,36 @@ export function resolveTo<R extends BaseRoute = BaseRoute, V = any>(
  * levels re-run on every hop(keep side-effectful guards idempotent) —
  * carrying the original user state; at most
  * {@link MAX_REDIRECTS 10} redirects are followed before a
- * {@link RedirectLoopError} is thrown. An unmatched pathname keeps the
+ * An unmatched pathname keeps the
  * {@link resolve resolve} behavior: the task rejects with a
  * {@link NotFoundError} and is routed through `router.errorHandler`.
+ *
+ * `opts.signal` is the abort signal of the whole chain: guards see it in
+ * their {@link GuardContext contexts}, the view task's
+ * {@link ResolveViewContext context} carries it on, and it is aborted
+ * once the navigation is superseded or cancelled. Standalone callers
+ * that pass nothing(e.g. {@link preload}) get a signal that never
+ * aborts — their resolution may be shared, so cancelling it on behalf of
+ * one consumer is not sound yet.
  *
  * @group Methods
  * @category Router
  * @param router router instance
  * @param location the location to resolve; the object itself is never
  * mutated — a redirect rebinds the resolution to a new location
+ * @param opts options; `signal` is the chain's abort signal
  * @returns the terminal location and its resolve task
  */
 export async function resolveEntry<R extends BaseRoute = BaseRoute, V = any>(
   router: RouterInstance<R, V>,
-  location: Location
+  location: Location,
+  opts?: {signal?: AbortSignal}
 ): Promise<ResolvedEntry<V>> {
   const {resolveView, errorHandler} = router;
+  // The chain owner(navigate/refresh) passes its controller's signal;
+  // standalone resolutions get one more controller whose signal never
+  // aborts, so downstream consumers always observe a real signal.
+  const {signal = new AbortController().signal} = opts ?? {};
   for (let redirects = 0; ; redirects++) {
     if (redirects > MAX_REDIRECTS) {
       throw new RedirectLoopError(location.pathname);
@@ -368,7 +393,8 @@ export async function resolveEntry<R extends BaseRoute = BaseRoute, V = any>(
         (await route.beforeLoad?.({
           router,
           location,
-          params: mergeMatchedParams(matched, i)
+          params: mergeMatchedParams(matched, i),
+          signal
         }));
       if (target) {
         location = toLocation(router, target, location.state);
@@ -381,7 +407,7 @@ export async function resolveEntry<R extends BaseRoute = BaseRoute, V = any>(
 
     return {
       location,
-      task: resolveView(matched, {router, location}).catch(errorHandler)
+      task: resolveView(matched, {router, location, signal}).catch(errorHandler)
     };
   }
 }
@@ -509,7 +535,8 @@ export function commit<R extends BaseRoute = BaseRoute, V = any>(
 function pushEntry<R extends BaseRoute = BaseRoute, V = any>(
   router: RouterCore<R, V>,
   entryPromise: Promise<ResolvedEntry<V>>,
-  fromLocation: Location
+  fromLocation: Location,
+  ac?: AbortController
 ): Promise<void> {
   const {history} = router;
   const nextIndex = getHistoryState(router).index + 1;
@@ -517,6 +544,7 @@ function pushEntry<R extends BaseRoute = BaseRoute, V = any>(
     router,
     entryPromise,
     fromLocation,
+    ac,
     (resolvedView, entry) => {
       const {location} = entry;
       let next = nextIndex - router.baseIndex;
@@ -572,7 +600,8 @@ export function commitReplace<R extends BaseRoute = BaseRoute, V = any>(
 function replaceEntry<R extends BaseRoute = BaseRoute, V = any>(
   router: RouterCore<R, V>,
   entryPromise: Promise<ResolvedEntry<V>>,
-  fromLocation: Location
+  fromLocation: Location,
+  ac?: AbortController
 ): Promise<void> {
   const {history} = router;
   const {index} = getHistoryState(router);
@@ -580,6 +609,7 @@ function replaceEntry<R extends BaseRoute = BaseRoute, V = any>(
     router,
     entryPromise,
     fromLocation,
+    ac,
     (resolvedView, entry) => {
       const {location} = entry;
       const physical = index - router.baseIndex;
@@ -610,14 +640,24 @@ function commitBase<R extends BaseRoute = BaseRoute, V = any>(
   router: RouterInstance<R, V>,
   entryPromise: Promise<ResolvedEntry<V>>,
   location: Location,
+  ac: AbortController | undefined,
   onResolved: (resolvedView: V, entry: ResolvedEntry<V>) => void
 ): Promise<void> {
+  const core = router as RouterCore<R, V>;
   const {currentGuard, onLoadingChange = noop} = router;
   if (router.resolving) {
     // Cancel current resolve
     onLoadingChange();
+    // ...and stop its requests: the guard below discards the superseded
+    // chain's result, so its in-flight guards/loaders must not keep
+    // consuming the network until they settle on their own.
+    core.resolvingController?.abort();
   }
   router.resolving = location;
+  // External commits(plain tasks from resolveTo/preload) carry no
+  // controller; clearing the slot keeps a stale one from being aborted
+  // by a later supersede.
+  core.resolvingController = ac;
   onLoadingChange('pending');
   return (
     // The whole chain — route guards AND the view task — is guarded from
@@ -630,16 +670,20 @@ function commitBase<R extends BaseRoute = BaseRoute, V = any>(
       )
     )
       .then(({entry, resolvedView}) => {
+        // This chain settled: it is no longer in flight. Clearing the
+        // mark BEFORE onResolved matters because onResolved commits
+        // history, which synchronously re-enters cancel() through the
+        // router's own listen() handler — an already-settled chain must
+        // not be aborted(or fire a cancel signal) as if it were still
+        // running. Superseded chains park forever, so the mark is always
+        // ours to clear.
+        router.resolving = undefined;
         onResolved(resolvedView, entry);
         // The navigation consumed this resolution: drop its preload
         // cache slots so a later preload re-resolves fresh state.
         evictPreloadCache<V>(router, entry.location);
       })
       .then(() => {
-        // This chain settled, so it is no longer in flight. Superseded
-        // chains park forever, so only the latest chain can reach here:
-        // the mark is always ours to clear.
-        router.resolving = undefined;
         onLoadingChange('resolved');
       })
       .catch((e) => {
@@ -655,7 +699,10 @@ function commitBase<R extends BaseRoute = BaseRoute, V = any>(
  * the view resolves; the history entry is committed on the terminal
  * location when guards redirected. The guard phase is part of the
  * cancelable navigation: a superseding navigate or a `cancel()` while
- * guards are still running discards this navigation.
+ * guards are still running discards this navigation — and aborts the
+ * chain's `signal`, so guards and loaders observing it({@link
+ * GuardContext.signal}, {@link ResolveViewContext.signal}) stop their
+ * requests instead of only having their results dropped.
  * @group Methods
  * @category Router
  * @param router router instance
@@ -668,16 +715,22 @@ export function navigate<R extends BaseRoute = BaseRoute, V = any>(
   state?: any
 ): Promise<void> {
   const location = toLocation(router, to, state);
+  // One controller per navigation round: guards and view loaders of the
+  // whole chain(including redirect hops) share its signal.
+  const ac = new AbortController();
   return pushEntry(
     router as RouterCore<R, V>,
-    resolveEntry<R, V>(router, location),
-    location
+    resolveEntry<R, V>(router, location, {signal: ac.signal}),
+    location,
+    ac
   );
 }
 
 /**
  * Refresh the page. Route guards run before the view resolves; a redirect
- * replaces the current entry with the terminal location.
+ * replaces the current entry with the terminal location. The refresh is a
+ * cancelable navigation chain like {@link navigate}: superseding it or
+ * `cancel()` aborts its signal.
  * @group Methods
  * @category Router
  * @param router router instance
@@ -686,10 +739,12 @@ export function refresh<R extends BaseRoute = BaseRoute, V = any>(
   router: RouterInstance<R, V>
 ) {
   const location = getLocation(router);
+  const ac = new AbortController();
   return replaceEntry(
     router as RouterCore<R, V>,
-    resolveEntry<R, V>(router, location),
-    location
+    resolveEntry<R, V>(router, location, {signal: ac.signal}),
+    location,
+    ac
   );
 }
 
@@ -747,7 +802,8 @@ export function createHref<R extends BaseRoute = BaseRoute, V = any>(
 }
 
 /**
- * Cancel the current navigate.
+ * Cancel the current navigate. The in-flight chain's guards/loaders are
+ * aborted through their signal, not merely discarded.
  * @group Methods
  * @category Router
  * @param router router instance
@@ -755,6 +811,15 @@ export function createHref<R extends BaseRoute = BaseRoute, V = any>(
 export function cancel<R extends BaseRoute = BaseRoute, V = any>(
   router: RouterInstance<R, V>
 ) {
+  const core = router as RouterCore<R, V>;
+  // Aborting is reserved for chains that are still running: a chain that
+  // just committed re-enters cancel() synchronously through listen()'s
+  // history handler and must not have its(possibly still-rendered) view
+  // contexts aborted after the fact.
+  if (router.resolving) {
+    core.resolvingController?.abort();
+    core.resolvingController = undefined;
+  }
   // The cancelled chain parks forever, so nothing else will clear the
   // in-flight mark: drop it here, or a later navigation would fire a
   // spurious cancel signal(`onLoadingChange()`) for a dead resolve.
