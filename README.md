@@ -27,6 +27,18 @@ const unlisten = listen(router, (view) => {
 });
 ```
 
+`viewStack` is the SPA-navigation counterpart of the browser's [bfcache](https://web.dev/articles/bfcache). The browser snapshots whole documents so cross-document back/forward restores instantly; the router snapshots resolved views so same-document back/forward (`pushState`/POP) does too. The two layers are complementary and never overlap: a same-document navigation never enters the bfcache, and a bfcache restore does not fire `popstate`. Together with your data layer they stack as **bfcache > viewStack > queryCache**, outermost first — any restore short-circuits every inner layer with zero requests, so freshness is compensated at the edges (e.g. refetch-on-focus in the query layer).
+
+Snapshots can outlive their validity — after a logout or an account switch, the previous account's resolved views are exactly what a back POP must not restore. `invalidate(router)` drops every snapshot at once: the currently rendered view is untouched (no re-resolve, no re-render), and the next back/forward re-runs the guards and loaders of the landed entry through the same lazy path as out-of-window entries.
+
+```ts
+import {invalidate} from '@native-router/core';
+
+// After the session identity changed: keep rendering the current view,
+// but never restore a snapshot of the previous account on back/forward.
+invalidate(router);
+```
+
 ### Survives a refresh
 
 The session stack is serialized into `history.state` as a bounded tail window (`maxStackDepth`, default 100) and restored on `create`. Warm the window once after a refresh with `initHistoryStack`, and every in-window back/forward renders from cache with zero requests. Entries outside the window fall back to a single lazy re-resolve.
@@ -59,6 +71,7 @@ commit(router, entry.task, entry.location); // commit like a click
 - Route guards: static `redirect` and async `beforeLoad` on every route level, run shallow → deep; more than 10 chained redirects reject with `RedirectLoopError`
 - Cancelable async navigation: a new resolve supersedes the in-flight one (`currentGuard`); `cancel()` aborts it; a history POP cancels it too. A superseded or cancelled `navigate()` promise **never settles** — don't `await` a navigation that might be superseded. Superseding or cancelling also aborts the chain's `AbortSignal`: guards (`beforeLoad` ctx) and view loaders (`ResolveViewContext`) receive it as `ctx.signal`, so their in-flight requests stop instead of only having results dropped; `preload` resolutions are shared and therefore never aborted
 - Navigation API: `navigate`, `refresh`, `go`/`forward`/`back`, `commit`/`commitReplace`, `createHref`, `getParams`, `match`, `toLocation`, `resolve`, `resolveTo`
+- `invalidate(router)`: drop the session view snapshots in one call — the current view stays rendered (no re-resolve, no re-render) and the next back/forward re-resolves through the guards; the typical call site is right after a logout/account switch, so a POP cannot render the previous account's data or bypass guards that already ran
 - Search validation via [Standard Schema](https://standardschema.dev): a `search` schema on any route level (zod/valibot/arktype, no hard dependency), parsed with `parseSearch`/`parseSearchSync`; failures throw `SearchError`
 - `preload(router, to, {ttl})`: resolve a target through the guards ahead of time, sharing one task across concurrent callers (in-flight dedup) with a TTL, default 30s; consumed entries are dropped on commit
 - `errorHandler` hook turns resolve failures into fallback views

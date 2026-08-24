@@ -27,6 +27,18 @@ const unlisten = listen(router, (view) => {
 });
 ```
 
+`viewStack` 是 SPA 内导航对应的 [bfcache](https://web.dev/articles/bfcache)。浏览器为跨文档导航快照整个文档，后退/前进瞬时还原；路由器为同文档导航（`pushState`/POP）快照已解析视图，达到同样效果。两层互补且不重叠：同文档导航不会进入 bfcache，bfcache 还原也不触发 `popstate`。与数据层叠加后构成三层缓存 **bfcache > viewStack > queryCache**，恢复从外向内短路——任一外层命中即零请求，新鲜度由边缘补偿（如 query 层的 focus 重验证）。
+
+快照可能活过它的有效期——登出或切换账号后，上一账号的已解析视图正是后退 POP 不该还原的东西。`invalidate(router)` 一次性丢弃全部快照：当前已渲染视图不受影响（不重解析、不重渲染），下一次前进/后退经与窗口外条目相同的惰性路径重跑落点条目的守卫与加载器。
+
+```ts
+import {invalidate} from '@native-router/core';
+
+// 会话身份变化后：当前视图继续渲染，
+// 但后退/前进绝不再还原上一账号的快照。
+invalidate(router);
+```
+
 ### 刷新后会话恢复
 
 会话栈以有界尾部窗口的形式序列化进 `history.state`（`maxStackDepth`，默认 100），`create` 时自动恢复。刷新后用 `initHistoryStack` 预热一次，窗口内的前进/后退全部从缓存渲染、零请求。窗口外的条目退化为单次惰性重解析。
@@ -59,6 +71,7 @@ commit(router, entry.task, entry.location); // 像点击一样提交
 - 路由守卫：每层路由支持静态 `redirect` 与异步 `beforeLoad`，按浅层到深层执行；连续重定向超过 10 次以 `RedirectLoopError` 拒绝
 - 可取消的异步导航：新的解析取代进行中的解析（`currentGuard`）；`cancel()` 主动中止；history POP 也会取消。被取代或被取消的 `navigate()` 返回的 promise **永远不会 settle**——不要 `await` 可能被取代的导航。取代/取消同时会 abort 该导航链的 `AbortSignal`：守卫（`beforeLoad` ctx）与视图加载器（`ResolveViewContext`）通过 `ctx.signal` 收到它，进行中的请求真正停止而非仅丢弃结果；`preload` 的解析因多方共享不会被 abort
 - 导航 API：`navigate`、`refresh`、`go`/`forward`/`back`、`commit`/`commitReplace`、`createHref`、`getParams`、`match`、`toLocation`、`resolve`、`resolveTo`
+- `invalidate(router)`：一次性丢弃会话视图快照——当前视图保持渲染（不重解析、不重渲染），下一次前进/后退经守卫重新解析；典型调用点是登出/切换账号之后，防止 POP 回退渲染上一账号数据或绕过会话内已执行过的守卫
 - 基于 [Standard Schema](https://standardschema.dev) 的 search 校验：任意路由层可声明 `search` 校验器（zod/valibot/arktype，无硬依赖），用 `parseSearch`/`parseSearchSync` 解析；失败抛出 `SearchError`
 - `preload(router, to, {ttl})`：提前经守卫解析目标，并发调用共享同一任务（in-flight 去重）并带 TTL（默认 30 秒）；commit 消费后即失效
 - `errorHandler` 钩子把解析失败转换为兜底视图
