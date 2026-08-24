@@ -23,7 +23,12 @@ import {
   preload,
   mergeMatchedParams
 } from '../src/router';
-import type {BaseRoute, HistoryState, StandardSchemaV1} from '../src/types';
+import type {
+  BaseRoute,
+  ExtractPathParams,
+  HistoryState,
+  StandardSchemaV1
+} from '../src/types';
 import {parseSearch, parseSearchInput, parseSearchSync} from '../src/search';
 import {
   NativeRouterError,
@@ -44,6 +49,48 @@ describe('Router', () => {
       const matched = match(router, '/bar');
       matched!.length.should.equal(2);
       matched![1].path.should.equal('/bar');
+    });
+
+    // ExtractPathParams 按 path-to-regexp 8.4.2 字符串语法建模
+    it('should model path params of the path-to-regexp 8.4.2 grammar', () => {
+      // :name 与段内前缀/后缀静态文本、多参数
+      expectTypeOf<ExtractPathParams<'/users/:id'>>().toEqualTypeOf<{
+        id: string;
+      }>();
+      expectTypeOf<ExtractPathParams<'/page-:id'>>().toEqualTypeOf<{
+        id: string;
+      }>();
+      expectTypeOf<ExtractPathParams<'/page-:id-end'>>().toEqualTypeOf<{
+        id: string;
+      }>();
+      // 多参数产出交叉类型（TS 不折叠对象交叉）
+      expectTypeOf<ExtractPathParams<'/:from-:to'>>().toEqualTypeOf<
+        {from: string} & {to: string}
+      >();
+
+      // 通配符 → string[]（含文本后嵌入的形式）
+      expectTypeOf<ExtractPathParams<'/files/*rest'>>().toEqualTypeOf<{
+        rest: string[];
+      }>();
+      expectTypeOf<ExtractPathParams<'/file*rest'>>().toEqualTypeOf<{
+        rest: string[];
+      }>();
+
+      // v6 遗留后缀：8.4.2 编译期即抛 PathError，一律不产出键
+      expectTypeOf<ExtractPathParams<'/users/:id?'>>().toEqualTypeOf<{}>();
+      expectTypeOf<ExtractPathParams<'/users/:id*'>>().toEqualTypeOf<{}>();
+      expectTypeOf<ExtractPathParams<'/users/:id+'>>().toEqualTypeOf<{}>();
+      expectTypeOf<ExtractPathParams<'/users/:id(\\d+)'>>().toEqualTypeOf<{}>();
+
+      // 静态段与空名（`:9x`、裸 `:` 运行时抛 Missing parameter name）
+      expectTypeOf<ExtractPathParams<'/a/b'>>().toEqualTypeOf<{}>();
+      expectTypeOf<ExtractPathParams<'/:9x'>>().toEqualTypeOf<{}>();
+      expectTypeOf<ExtractPathParams<'/:'>>().toEqualTypeOf<{}>();
+
+      // 转义冒号是静态文本，不是参数
+      expectTypeOf<ExtractPathParams<'/a\\:b/:id'>>().toEqualTypeOf<{
+        id: string;
+      }>();
     });
   });
 

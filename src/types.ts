@@ -96,33 +96,145 @@ export type SearchInput = Record<string, string | string[]>;
 export type SearchOutputOf<S> =
   S extends StandardSchemaV1<any, infer Output> ? Output : never;
 
+/** ASCII approximation of path-to-regexp's `ID_Start`. */
+type ParamStartChar =
+  | 'a'
+  | 'b'
+  | 'c'
+  | 'd'
+  | 'e'
+  | 'f'
+  | 'g'
+  | 'h'
+  | 'i'
+  | 'j'
+  | 'k'
+  | 'l'
+  | 'm'
+  | 'n'
+  | 'o'
+  | 'p'
+  | 'q'
+  | 'r'
+  | 's'
+  | 't'
+  | 'u'
+  | 'v'
+  | 'w'
+  | 'x'
+  | 'y'
+  | 'z'
+  | 'A'
+  | 'B'
+  | 'C'
+  | 'D'
+  | 'E'
+  | 'F'
+  | 'G'
+  | 'H'
+  | 'I'
+  | 'J'
+  | 'K'
+  | 'L'
+  | 'M'
+  | 'N'
+  | 'O'
+  | 'P'
+  | 'Q'
+  | 'R'
+  | 'S'
+  | 'T'
+  | 'U'
+  | 'V'
+  | 'W'
+  | 'X'
+  | 'Y'
+  | 'Z'
+  | '_'
+  | '$';
+
+/** ASCII approximation of path-to-regexp's `ID_Continue`. */
+type ParamContinueChar =
+  ParamStartChar | '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9';
+
+type ParamValueOf<
+  Name extends string,
+  Mode extends 'param' | 'wildcard'
+> = Mode extends 'wildcard' ? {[K in Name]: string[]} : {[K in Name]: string};
+
 /**
- * Params contributed by a single path segment: `:name` is required,
- * `:name?` is optional, anything else(static or wildcard) contributes
- * nothing.
+ * Scan a segment char by char: `\\x` escapes the next char, `:name`
+ * starts a param, `*name` starts a wildcard, anything else is static
+ * text.
+ */
+type SegmentParamsOf<Seg extends string> =
+  Seg extends `${infer Char}${infer Rest}`
+    ? Char extends '\\'
+      ? Rest extends `${string}${infer Tail}`
+        ? SegmentParamsOf<Tail>
+        : {}
+      : Char extends ':' | '*'
+        ? Rest extends `${infer First}${infer Rest2}`
+          ? First extends ParamStartChar
+            ? // eslint-disable-next-line no-use-before-define -- mutually recursive with the name scanner
+              ParamNameOf<Rest2, First, Char extends '*' ? 'wildcard' : 'param'>
+            : {} // Empty/quoted/digit-led name: runtime throws
+          : {} // Trailing bare `:` or `*`
+        : SegmentParamsOf<Rest>
+    : {};
+
+/** Consume the identifier run started by a `ParamStartChar`. */
+type ParamNameOf<
+  Rest extends string,
+  Name extends string,
+  Mode extends 'param' | 'wildcard'
+> = Rest extends `${infer Char}${infer Tail}`
+  ? Char extends ParamContinueChar
+    ? ParamNameOf<Tail, `${Name}${Char}`, Mode>
+    : Char extends '?' | '(' | ')' | '[' | ']' | '+' | '!' | '*'
+      ? {} // `:id?` / `:id(\\d+)` / `:id*` …: runtime parse throws
+      : ParamValueOf<Name, Mode> & SegmentParamsOf<Rest>
+  : ParamValueOf<Name, Mode>;
+
+/**
+ * Params contributed by a single path segment, modeled after the
+ * path-to-regexp **8.4.2** string grammar(the version this package
+ * locks):
  *
- * Only the segment-exact forms of the path-to-regexp 6 syntax are
- * modeled. Prefix/suffix params(`/page-:id`), repetitions(`:id*`,
- * `:id+`) and custom regexes(`:id(\\d+)`) are matched at runtime but
- * not modeled here — they simply contribute no keys.
+ * - `:name` contributes a required `string` param wherever it appears
+ *   in the segment — `:id`, `page-:id`, `:from-:to` all work at
+ *   runtime and are modeled;
+ * - `*name` contributes a `string[]` wildcard param(the runtime
+ *   matcher splits a wildcard value by `/`).
+ *
+ * Everything else contributes nothing:
+ *
+ * - the v6-era suffixes `:id?`, `:id+`, `:id*`, `:id(\\d+)` are **not**
+ *   runtime syntax in 8.4.2 — the matcher throws a `PathError` when the
+ *   path is compiled, so they are deliberately left unmodeled instead
+ *   of endorsing a path that crashes;
+ * - quoted names(`:"x y"`) and non-ASCII identifier chars are not
+ *   modeled(the scanner only knows ASCII identifiers).
+ *
+ * Note: wildcard params surface as `string[]` at runtime while the
+ * router-level types(`Matched.params`,
+ * {@link GuardContext.params}) are `Record<string, string>` — the
+ * router does not model wildcard params.
  * @group Types
  * @category Route
  */
-export type PathParamsOf<Seg extends string> = Seg extends `:${infer Name}?`
-  ? {[K in Name & string]?: string}
-  : Seg extends `:${infer Name}`
-    ? {[K in Name & string]: string}
-    : {};
+export type PathParamsOf<Seg extends string> = SegmentParamsOf<Seg>;
 
 /**
  * Extract the params shape of a route path pattern. Splits the pattern
  * into `/`-separated segments and intersects the params of each, e.g.
- * `ExtractPathParams<'/users/:id/posts/:postId?'>` is
- * `{id: string} & {postId?: string}`.
+ * `ExtractPathParams<'/users/:id/files/*rest'>` is
+ * `{id: string} & {rest: string[]}`.
  *
- * Within the modeled path-to-regexp 6 syntax scope(see
- * {@link PathParamsOf}); wildcards(`*`) and static segments are
- * ignored. Distributes over unions of patterns.
+ * Within the modeled path-to-regexp 8.4.2 syntax scope(see
+ * {@link PathParamsOf}); static segments are ignored and v6-era
+ * suffixes(`:id?`, `:id(\\d+)`, …) contribute nothing because the
+ * runtime matcher rejects them. Distributes over unions of patterns.
  * @group Types
  * @category Route
  */
