@@ -18,6 +18,7 @@ import {
   cancel,
   listen,
   initHistoryStack,
+  invalidate,
   getCurrentView,
   getParams,
   preload,
@@ -900,6 +901,138 @@ describe('Router', () => {
       state
         .locationStack!.map((l) => l.pathname)
         .should.deepEqual(['/foo', '/bar', '/baz']);
+    });
+  });
+
+  describe('invalidate', () => {
+    const tick = () =>
+      new Promise((done) => {
+        setTimeout(done);
+      });
+
+    it('should re-run the guard and the loader of the landed entry on a back POP', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const beforeLoad = sinon.fake.resolves(undefined);
+      const resolveView = sinon.fake((matched: any[]) =>
+        Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const router = create(
+        {path: '', children: [{path: '/a', beforeLoad}, {path: '/b'}]},
+        history,
+        resolveView
+      );
+      const views: string[] = [];
+      listen(router, (v) => views.push(v as string));
+      await tick();
+
+      await navigate(router, '/b');
+      // listen's initial lazy refresh of /a plus the pushed /b.
+      beforeLoad.callCount.should.equal(1);
+      resolveView.callCount.should.equal(2);
+
+      invalidate(router);
+      // Every snapshot is gone, but the window shape survives.
+      router.viewStack.should.deepEqual([null, null]);
+
+      go(router, -1);
+      await tick();
+      await tick();
+      history.location.pathname.should.equal('/a');
+      // The POP hit no snapshot and fell back to the lazy re-resolve
+      // path — the same one out-of-window entries take — so both the
+      // guard and the loader ran again on the landed entry.
+      beforeLoad.callCount.should.equal(2);
+      resolveView.callCount.should.equal(3);
+      views.at(-1)!.should.equal('view:/a');
+    });
+
+    it('should serve a back POP from the viewStack without invalidate', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const resolveView = sinon.fake((matched: any[]) =>
+        Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const router = create(
+        {path: '', children: [{path: '/a'}, {path: '/b'}]},
+        history,
+        resolveView
+      );
+      const views: string[] = [];
+      listen(router, (v) => views.push(v as string));
+      await tick();
+
+      await navigate(router, '/b');
+      resolveView.callCount.should.equal(2);
+
+      // No invalidate: the POP lands on the cached view with zero
+      // requests — the contrast to the case above.
+      go(router, -1);
+      history.location.pathname.should.equal('/a');
+      views.at(-1)!.should.equal('view:/a');
+      resolveView.callCount.should.equal(2);
+    });
+
+    it('should re-apply a guard redirect on a back POP after invalidate', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      let loggedOut = false;
+      const router = create(
+        {
+          path: '',
+          children: [
+            {
+              path: '/a',
+              beforeLoad: () => (loggedOut ? '/login' : undefined)
+            },
+            {path: '/b'},
+            {path: '/login'}
+          ]
+        },
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const views: string[] = [];
+      listen(router, (v) => views.push(v as string));
+      await tick();
+
+      await navigate(router, '/b');
+      history.location.pathname.should.equal('/b');
+
+      // Logout: drop the snapshots, then try to go back to /a.
+      invalidate(router);
+      loggedOut = true;
+      go(router, -1);
+      await tick();
+      await tick();
+      // The re-run guard redirected the landed entry, so the previous
+      // account's view is never restored.
+      history.location.pathname.should.equal('/login');
+      views.at(-1)!.should.equal('view:/login');
+    });
+
+    it('should leave the current view untouched by invalidate', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const resolveView = sinon.fake((matched: any[]) =>
+        Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const router = create(
+        {path: '', children: [{path: '/a'}, {path: '/b'}]},
+        history,
+        resolveView
+      );
+      const views: string[] = [];
+      listen(router, (v) => views.push(v as string));
+      await tick();
+
+      await navigate(router, '/b');
+      const viewCount = views.length;
+      const resolveCount = resolveView.callCount;
+
+      invalidate(router);
+      await tick();
+      await tick();
+      // Neither re-resolved nor re-emitted: the rendered view stays.
+      resolveView.callCount.should.equal(resolveCount);
+      views.length.should.equal(viewCount);
+      history.location.pathname.should.equal('/b');
     });
   });
 

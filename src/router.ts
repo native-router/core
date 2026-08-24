@@ -100,8 +100,15 @@ export function create<R extends BaseRoute = BaseRoute, V = any>(
 
     history: instanceHistory,
     locationStack,
-    // The view stack is window-relative, so it is exactly as long as the
-    // location window and stays bounded by maxStackDepth with it.
+    // The view stack is the SPA-navigation counterpart of the browser's
+    // bfcache — a resolved-view snapshot per history entry, restored with
+    // zero requests on POP. It is window-relative, so it is exactly as
+    // long as the location window and stays bounded by maxStackDepth
+    // with it; invalidate() drops these snapshots.
+    //
+    // viewStack 是 SPA 内导航对应的 bfcache——每个 history 条目一份已解析
+    // 视图快照，POP 时零请求还原。它按窗口相对位置存放，与 location 窗口
+    // 等长、随 maxStackDepth 一同封顶；invalidate() 丢弃这些快照。
     viewStack: new Array(locationStack.length).fill(null),
     baseIndex,
     preloadCache: new Map(),
@@ -847,6 +854,33 @@ export function initHistoryStack<R extends BaseRoute = BaseRoute, V = any>(
   ).then((views) => {
     router.viewStack = views;
   });
+}
+
+/**
+ * Drop every view snapshot of the session window. The already rendered
+ * view is untouched — no re-resolve, no re-render; only future POPs
+ * change: with no snapshot to hit, {@link listen} falls back to the same
+ * lazy re-resolve path as out-of-window entries, so the landed entry's
+ * guards(`redirect`/`beforeLoad`) and loaders run again. Call it when
+ * the snapshots stop being valid — e.g. right after a logout or an
+ * account switch, so a back POP cannot render the previous account's
+ * view or bypass guards that already ran in the session.
+ *
+ * 丢弃会话窗口内的全部视图快照。已渲染的当前视图不受影响——不重解析、
+ * 不重渲染；变化的只有后续 POP：无快照可命中时，listen 落入与窗口外条目
+ * 相同的惰性重解析路径，落点条目的守卫与加载器重新执行。快照失效时调用
+ * ——例如登出/切换账号后，后退 POP 不再渲染上一账号的视图、也不再绕过
+ * 会话内已执行过的守卫。
+ * @group Methods
+ * @category Router
+ * @param router router instance
+ */
+export function invalidate<R extends BaseRoute = BaseRoute, V = any>(
+  router: RouterInstance<R, V>
+) {
+  // Keep the window shape: locationStack stays untouched, so getParams
+  // and the serialized window keep working — only the snapshots go.
+  router.viewStack = new Array(router.locationStack.length).fill(null);
 }
 
 /**
