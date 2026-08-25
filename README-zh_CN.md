@@ -111,6 +111,14 @@ const router = create(
 - `parseSearch(schema, search)` 解析出 schema 输出（异步校验器会被 await）；`parseSearchSync` 是渲染/守卫时机的同步版本，遇到异步校验器会抛出明确的错误
 - 校验不通过抛出 `SearchError`（`NativeRouterError` 的子类），携带原始 `search` 与 schema 报告的 `issues`——像其他解析失败一样交给 `errorHandler` 处理
 
+## 设计原则
+
+**导航语义跟随浏览器**——native-router 对齐的是浏览器原生导航语义（browser-native navigation semantics），而非其它 SPA 路由库的行为。后续所有导航 API 设计决策都以此为唯一准绳，「某个流行 router 有」本身不构成跟进的理由。这些是有意设计，不是待修的 bug。
+
+- **进行中的导航保留旧视图。** 整条链——守卫、加载器——全部 settle 后才 commit 并 `history.push`。对应浏览器：旧文档一直显示到新文档 commit。导航被取代/取消即浏览器的 stop/ESC——留在旧页，URL 分毫未动。
+- **失败即错误视图。** 解析失败走错误渲染语义（core 的 `errorHandler`，react 绑定的 `errorComponent`）——对应浏览器错误页。不存在「等待超时 → 切换 loading 页」：浏览器没有 UI 层加载超时，超时表现为网络层失败的错误页。
+- **推论：不做 pending 超时升级。** 不引入 TanStack 式 `pendingMs` / in-app `pendingComponent` 超时升级；pending 视图仅在冷启动/刷新（无旧视图可保）时渲染。
+
 ## 安装
 
 ```bash

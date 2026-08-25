@@ -111,6 +111,14 @@ const router = create(
 - `parseSearch(schema, search)` resolves the schema output (async validators are awaited); `parseSearchSync` is the render/guard-time flavor and rejects async validators with a clear error
 - A rejected validation throws `SearchError` (a `NativeRouterError`) carrying the raw `search` and the reported `issues` — route it through your `errorHandler` like any other resolve failure
 
+## Design principles
+
+**Navigation semantics follow the browser** — native-router aligns with browser-native navigation semantics, not with what other SPA routers happen to do. Every navigation API decision is measured against that yardstick; "a popular router has it" is not, by itself, a reason to follow. These are deliberate choices, not bugs to fix.
+
+- **An in-flight navigation keeps the old view.** The chain — guards, loaders — settles as a whole, and only then commits and pushes (`history.push`). The browser does the same: the old document stays displayed until the new one commits. A superseded or cancelled navigation is the browser's stop button / ESC — you stay on the old page and the URL never moved.
+- **Failure means an error view.** A failed resolve renders the error semantics (`errorHandler` in core, `errorComponent` in the react bindings) — the counterpart of the browser's error page. There is no "waited too long → switch to a loading view" path: the browser has no UI-layer load timeout; a timeout surfaces as a network-layer failure, i.e. an error page.
+- **Corollary: no pending-timeout escalation.** No TanStack-style `pendingMs` / in-app `pendingComponent` timeout upgrade. A pending view renders only on cold start / refresh, when there is no old view to keep.
+
 ## Install
 
 ```bash
