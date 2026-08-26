@@ -17,6 +17,7 @@ import {
   createHref,
   cancel,
   listen,
+  setBlocker,
   initHistoryStack,
   invalidate,
   getCurrentView,
@@ -1519,6 +1520,325 @@ describe('Router', () => {
       statuses.should.deepEqual(['pending']);
       await task;
       statuses.should.deepEqual(['pending', 'resolved']);
+    });
+  });
+
+  describe('setBlocker', () => {
+    const tick = () =>
+      new Promise((done) => {
+        setTimeout(done);
+      });
+
+    it('should veto a navigate before the chain ever starts', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const resolveView = sinon.fake((matched: any[]) =>
+        Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const router = create(
+        {path: '', children: [{path: '/a'}, {path: '/b'}]},
+        history,
+        resolveView
+      );
+      const asks: [string, string][] = [];
+      const unblock = setBlocker(router, (to, from) => {
+        asks.push([to, from]);
+        return false;
+      });
+
+      // A vetoed navigate resolves immediately — not an error, and
+      // unlike a cancelled navigation it does settle.
+      await navigate(router, '/b?x=1#top');
+      asks.should.deepEqual([['/b?x=1#top', '/a']]);
+      history.location.pathname.should.equal('/a');
+      router.locationStack.map((l) => l.pathname).should.deepEqual(['/a']);
+      // No guard, no loader, no controller: nothing ever started.
+      resolveView.callCount.should.equal(0);
+      (router.resolving === undefined).should.be.true();
+
+      // Releasing(doubly, idempotently) lets the navigation through.
+      unblock();
+      unblock();
+      await navigate(router, '/b');
+      history.location.pathname.should.equal('/b');
+      resolveView.callCount.should.equal(1);
+    });
+
+    it('should let the first veto short-circuit the later blockers', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const router = create(
+        {path: '', children: [{path: '/a'}, {path: '/b'}]},
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const calls: string[] = [];
+      setBlocker(router, (to) => {
+        calls.push(`one:${to}`);
+        return true;
+      });
+      setBlocker(router, (to) => {
+        calls.push(`two:${to}`);
+        return false;
+      });
+      setBlocker(router, (to) => {
+        calls.push(`three:${to}`);
+        return true;
+      });
+
+      await navigate(router, '/b');
+      calls.should.deepEqual(['one:/b', 'two:/b']);
+      history.location.pathname.should.equal('/a');
+    });
+
+    it('should veto commit and commitReplace at the chain head', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const resolveView = sinon.fake((matched: any[]) =>
+        Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const router = create(
+        {path: '', children: [{path: '/a'}, {path: '/b'}]},
+        history,
+        resolveView
+      );
+      setBlocker(router, () => false);
+
+      await commit(
+        router,
+        Promise.resolve('view:/b'),
+        toLocation(router, '/b')
+      );
+      await commitReplace(
+        router,
+        Promise.resolve('view:/b'),
+        toLocation(router, '/b')
+      );
+      // The dropped task's failure is swallowed too — without the
+      // handler an orphaned rejection would escape as unhandled.
+      await commit(
+        router,
+        Promise.reject(new Error('dropped task failure')),
+        toLocation(router, '/b')
+      );
+      await commitReplace(
+        router,
+        Promise.reject(new Error('dropped task failure')),
+        toLocation(router, '/b')
+      );
+      history.location.pathname.should.equal('/a');
+      router.locationStack.map((l) => l.pathname).should.deepEqual(['/a']);
+      resolveView.callCount.should.equal(0);
+    });
+
+    it('should never block a refresh', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      let calls = 0;
+      const resolveView = sinon.fake((matched: any[]) =>
+        Promise.resolve(`view:${matched.at(-1)!.path}:${++calls}`)
+      );
+      const router = create(
+        {path: '', children: [{path: '/a'}, {path: '/b'}]},
+        history,
+        resolveView
+      );
+      await navigate(router, '/b');
+      resolveView.callCount.should.equal(1);
+      setBlocker(router, () => false);
+
+      await refresh(router);
+      // Same location re-resolved: a refresh is not a page leave.
+      history.location.pathname.should.equal('/b');
+      (history.location.state as HistoryState).index.should.equal(1);
+      resolveView.callCount.should.equal(2);
+    });
+
+    it('should ask a redirecting chain once, at its head', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const router = create(
+        {path: '', children: [{path: '/a', redirect: '/b'}, {path: '/b'}]},
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const asks: string[] = [];
+      // Veto every target except the one actually navigated to: a second
+      // query for the redirect terminal '/b' would eat the navigation.
+      setBlocker(router, (to) => {
+        asks.push(to);
+        return to !== '/b';
+      });
+
+      await navigate(router, '/a');
+      asks.should.deepEqual(['/a']);
+      history.location.pathname.should.equal('/b');
+      getCurrentView(router).should.equal('view:/b');
+    });
+
+    it('should rewind a vetoed back POP to the current entry', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const router = create(
+        {
+          path: '',
+          children: [{path: '/a'}, {path: '/b'}, {path: '/c'}]
+        },
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const views: string[] = [];
+      listen(router, (v) => views.push(v as string));
+      await tick();
+      await navigate(router, '/b');
+      await navigate(router, '/c');
+      views.length = 0;
+
+      const asks: [string, string][] = [];
+      setBlocker(router, (to, from) => {
+        asks.push([to, from]);
+        return false;
+      });
+
+      go(router, -2);
+      // The rewind(memory history is synchronous) puts the URL, the
+      // state index and the rendered view all back on /c.
+      history.location.pathname.should.equal('/c');
+      (history.location.state as HistoryState).index.should.equal(2);
+      asks.should.deepEqual([['/a', '/c']]);
+      // The rewind's own landing re-announced the current view exactly
+      // once — the blocked target never showed, and no window-sync
+      // replace follows: the landed entry already carries the live
+      // window.
+      views.should.deepEqual(['view:/c']);
+    });
+
+    it('should let an allowed POP land normally', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const router = create(
+        {
+          path: '',
+          children: [{path: '/a'}, {path: '/b'}, {path: '/c'}]
+        },
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const views: string[] = [];
+      listen(router, (v) => views.push(v as string));
+      await tick();
+      await navigate(router, '/b');
+      await navigate(router, '/c');
+      views.length = 0;
+      setBlocker(router, () => true);
+
+      go(router, -1);
+      history.location.pathname.should.equal('/b');
+      (history.location.state as HistoryState).index.should.equal(1);
+      views.at(-1)!.should.equal('view:/b');
+    });
+
+    it('should keep an in-flight chain running across a vetoed POP', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      let releaseGuard!: () => void;
+      const guardGate = new Promise<void>((done) => {
+        releaseGuard = done;
+      });
+      const observedAborts: boolean[] = [];
+      const router = create(
+        {
+          path: '',
+          children: [
+            {path: '/a'},
+            {path: '/b'},
+            {
+              path: '/c',
+              beforeLoad: async ({signal}) => {
+                await guardGate;
+                observedAborts.push(signal.aborted);
+              }
+            }
+          ]
+        },
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const views: string[] = [];
+      listen(router, (v) => views.push(v as string));
+      await tick();
+      await navigate(router, '/b');
+      views.length = 0;
+
+      // The chain to '/c' parks at its guard; while it runs, a POP
+      // back to '/a' is vetoed and rewound. The blocker lets only the
+      // chain's own target through.
+      const navigation = navigate(router, '/c');
+      setBlocker(router, (to) => to === '/c');
+      go(router, -1);
+      // The rewind landed back on '/b' and the chain is still in
+      // flight — the landing neither cancelled nor aborted it.
+      history.location.pathname.should.equal('/b');
+      (router.resolving === undefined).should.be.false();
+      views.should.deepEqual(['view:/b']);
+
+      releaseGuard();
+      await navigation;
+      // The guard never observed an abort and the chain committed.
+      observedAborts.should.deepEqual([false]);
+      history.location.pathname.should.equal('/c');
+      (history.location.state as HistoryState).index.should.equal(2);
+      getCurrentView(router).should.equal('view:/c');
+      views.should.deepEqual(['view:/b', 'view:/c']);
+    });
+
+    it('should count a throwing blocker as a veto, not an escape', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const router = create(
+        {path: '', children: [{path: '/a'}, {path: '/b'}]},
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const views: string[] = [];
+      listen(router, (v) => views.push(v as string));
+      await tick();
+      await navigate(router, '/b');
+      views.length = 0;
+      setBlocker(router, (to) => {
+        if (to === '/a') throw new Error('boom');
+        return true;
+      });
+
+      // navigate path: the throw vetoes instead of escaping navigate().
+      await navigate(router, '/a');
+      history.location.pathname.should.equal('/b');
+
+      // POP path: the throw vetoes inside the history listener instead
+      // of breaking it, and the POP is rewound like any veto.
+      go(router, -1);
+      history.location.pathname.should.equal('/b');
+      (history.location.state as HistoryState).index.should.equal(1);
+      views.should.deepEqual(['view:/b']);
+    });
+
+    it('should ask navigate and POP blockers in the same baseUrl form', async () => {
+      const history = createMemoryHistory({initialEntries: ['/app/a']});
+      const router = create(
+        {path: '', children: [{path: '/a'}, {path: '/b'}]},
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`),
+        {baseUrl: '/app'}
+      );
+      const views: string[] = [];
+      listen(router, (v) => views.push(v as string));
+      await tick();
+      const asks: [string, string][] = [];
+      setBlocker(router, (to, from) => {
+        asks.push([to, from]);
+        return true;
+      });
+
+      await navigate(router, '/b?x=1');
+      go(router, -1);
+      // Both entry points see the same committed path form, baseUrl
+      // included: the navigate `from` equals the POP `to`.
+      asks.should.deepEqual([
+        ['/app/b?x=1', '/app/a'],
+        ['/app/a', '/app/b?x=1']
+      ]);
+      history.location.pathname.should.equal('/app/a');
     });
   });
 

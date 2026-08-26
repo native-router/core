@@ -530,6 +530,15 @@ export function commit<R extends BaseRoute = BaseRoute, V = any>(
   resolvePromise: Promise<V>,
   location: Location
 ): Promise<void> {
+  // Blockers sit at the chain head: a vetoed external commit is dropped
+  // before the given task is ever awaited. The dropped task still gets
+  // a rejection handler — an orphaned failure(preload tasks re-throw
+  // NotFoundError through the default errorHandler) would otherwise
+  // surface as an unhandled rejection.
+  if (blockedBy(router, createPath(location))) {
+    resolvePromise.catch(noop);
+    return Promise.resolve();
+  }
   // Wrap the raw task so external callers share the guarded entry
   // pipeline; the entry location is the given one, as-is.
   return pushEntry(
@@ -597,6 +606,12 @@ export function commitReplace<R extends BaseRoute = BaseRoute, V = any>(
   resolvePromise: Promise<V>,
   location: Location
 ): Promise<void> {
+  // Same chain-head veto as commit: a blocked replace never starts, and
+  // the dropped task's failure is swallowed the same way.
+  if (blockedBy(router, createPath(location))) {
+    resolvePromise.catch(noop);
+    return Promise.resolve();
+  }
   return replaceEntry(
     router as RouterCore<R, V>,
     Promise.resolve({location, task: resolvePromise} as ResolvedEntry<V>),
@@ -704,7 +719,9 @@ function commitBase<R extends BaseRoute = BaseRoute, V = any>(
 /**
  * Navigate to a new path. Route guards(`redirect`/`beforeLoad`) run before
  * the view resolves; the history entry is committed on the terminal
- * location when guards redirected. The guard phase is part of the
+ * location when guards redirected. A registered blocker(see {@link
+ * setBlocker}) may veto the navigation before anything starts. The guard
+ * phase is part of the
  * cancelable navigation: a superseding navigate or a `cancel()` while
  * guards are still running discards this navigation — and aborts the
  * chain's `signal`, so guards and loaders observing it({@link
@@ -722,6 +739,14 @@ export function navigate<R extends BaseRoute = BaseRoute, V = any>(
   state?: any
 ): Promise<void> {
   const location = toLocation(router, to, state);
+  // Blockers sit at the chain head, before the controller exists: a
+  // vetoed navigation never resolves a single guard, and its promise
+  // resolves immediately — a veto is not an error, and unlike a
+  // cancelled navigation(whose promise never settles) it does settle —
+  // so the ubiquitous `void navigate(...)` call sites stay untouched.
+  // The target is asked in its committed path form(`createPath`), the
+  // same string a POP blocker sees, baseUrl included.
+  if (blockedBy(router, createPath(location))) return Promise.resolve();
   // One controller per navigation round: guards and view loaders of the
   // whole chain(including redirect hops) share its signal.
   const ac = new AbortController();
@@ -884,6 +909,159 @@ export function invalidate<R extends BaseRoute = BaseRoute, V = any>(
 }
 
 /**
+ * Navigation blocker predicate: `to` and `from` are path strings
+ * (pathname, search and hash included, built with `createPath`). Return
+ * `false` to veto the navigation. A blocker that throws counts as a
+ * veto too — a crashed gate must not open, and the exception must not
+ * escape into a history listener.
+ * @group Methods
+ * @category Router
+ */
+export type BlockerFn = (to: string, from: string) => boolean;
+
+/**
+ * Registered blockers per router, in registration order. Module-level
+ * so the public {@link RouterInstance} type stays untouched; the router
+ * key is weakly held, an empty leftover set after the last release
+ * leaks nothing.
+ */
+const blockerRegistry = new WeakMap<RouterInstance<any>, Set<BlockerFn>>();
+
+/**
+ * Last settled history position per router, kept in sync by {@link listen}.
+ * POP blockers read it as the `from` path and the rewind base: by the
+ * time a POP listener runs, `history.location` is already the landed
+ * location, so the pre-POP position must be tracked separately.
+ */
+const lastSettled = new WeakMap<
+  RouterInstance<any>,
+  {index: number; location: Location}
+>();
+
+/**
+ * Pending blocker rewind per router: a rewind `go()` is in flight. The
+ * rewind's own POP must not query the blockers again — they would veto
+ * it too and ping-pong the history forever.
+ */
+const pendingRewind = new WeakMap<RouterInstance<any>, true>();
+
+/**
+ * Register a navigation blocker. Every {@link navigate}, {@link commit},
+ * {@link commitReplace} and every history POP(see {@link listen}) asks
+ * the registered blockers(in registration order, first veto wins)
+ * before anything else; a vetoed navigation never starts — no guards,
+ * no loaders, no history change — and its promise resolves immediately
+ * (a veto is not an error; unlike a cancelled navigation, whose promise
+ * never settles, a vetoed one does). `refresh` and guard redirects
+ * are never blocked: a refresh re-resolves the current location, and a
+ * redirect is the guard chain's own target correction, already asked
+ * once at the chain head. A vetoed POP is rewound with a
+ * counter-`go()`; its landing re-announces the current view without
+ * cancelling an in-flight chain.
+ * @group Methods
+ * @category Router
+ * @param router router instance
+ * @param fn blocker predicate; `to` is the target path, `from` the
+ * current path, both path strings
+ * @returns unblock - remove the blocker(idempotent)
+ */
+export function setBlocker<R extends BaseRoute = BaseRoute, V = any>(
+  router: RouterInstance<R, V>,
+  fn: BlockerFn
+): () => void {
+  let set = blockerRegistry.get(router);
+  if (!set) {
+    set = new Set();
+    blockerRegistry.set(router, set);
+  }
+  set.add(fn);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    set.delete(fn);
+  };
+}
+
+/**
+ * Ask every registered blocker, in registration order. The first veto
+ * wins — `some` stops asking at it — and a blocker that throws counts
+ * as a veto: a crashed gate must not open, and the exception must not
+ * escape into a history listener.
+ */
+function vetoedBy(set: Set<BlockerFn>, to: string, from: string) {
+  return Array.from(set).some((block) => {
+    try {
+      return !block(to, from);
+    } catch {
+      return true;
+    }
+  });
+}
+
+/**
+ * Ask the blockers about a router-driven navigation. Runs before
+ * anything else, so `history.location` is still the pre-navigation
+ * `from`. Returns `true` when any blocker vetoed.
+ */
+function blockedBy(router: RouterInstance<any>, to: string) {
+  const set = blockerRegistry.get(router);
+  if (!set) return false;
+  return vetoedBy(set, to, createPath(router.history.location));
+}
+
+/**
+ * Ask the blockers about a history POP; rewind it when vetoed.
+ * Returns the POP's disposition for {@link listen}:
+ * - `'vetoed'`: a blocker vetoed. The caller drops the event wholesale
+ *   — no `onViewChange`, no window sync, and no `cancel()` either, so
+ *   an in-flight chain keeps running as if the POP never happened.
+ * - `'rewind'`: this POP is the landing of an earlier veto's rewind,
+ *   back on the entry the router never left. The router state did not
+ *   change, so the caller re-announces the current view without
+ *   cancelling the in-flight chain or re-syncing the window state.
+ * - `false`: not blocked; the caller handles the POP normally.
+ */
+function blockedPop(
+  router: RouterInstance<any>,
+  location: Location,
+  index: number
+): 'vetoed' | 'rewind' | false {
+  const {history} = router;
+  // A pending rewind's own landing: swallow it without a second query
+  // (a blocker that vetoes leaving a page would veto the rewind too)
+  // and report it for the no-cancel re-announce branch in the caller.
+  // Deliberately not index-matched: a user POP racing the pending
+  // rewind must never re-enter the blockers either.
+  if (pendingRewind.delete(router)) return 'rewind';
+
+  const set = blockerRegistry.get(router);
+  if (!set) return false;
+  // Without a settled baseline(unreachable while this listener exists:
+  // listen() seeds the tracker before registering) there is neither a
+  // `from` nor a rewind delta to work with — let the POP land rather
+  // than veto blind.
+  const settled = lastSettled.get(router);
+  if (!settled) return false;
+  const to = createPath(location);
+  const from = createPath(settled.location);
+  if (!vetoedBy(set, to, from)) return false;
+  // Rewind by the distance the POP travelled. Router-driven pushes keep
+  // the state index and the history index in lockstep, so the delta
+  // between the landed and settled state indexes doubles as the history
+  // delta. A zero delta(same-index POP between stateless external
+  // entries) cannot be rewound — `go(0)` goes nowhere — so the URL
+  // stays on the vetoed target while the router stacks and the
+  // rendered view keep the current entry.
+  const delta = index - settled.index;
+  if (delta) {
+    pendingRewind.set(router, true);
+    history.go(-delta);
+  }
+  return 'vetoed';
+}
+
+/**
  * Listen the history change.
  * @group Methods
  * @category Router
@@ -897,11 +1075,45 @@ export function listen<R extends BaseRoute = BaseRoute, V = any>(
 ) {
   const {history} = router;
 
-  const rmListener = history.listen(({action, location}) => {
-    cancel(router);
+  // Seed the settled-position tracker so a POP arriving before any other
+  // history change still reads a correct `from` and rewind delta.
+  lastSettled.set(router, {
+    index: getHistoryState(router).index,
+    location: history.location
+  });
 
+  const rmListener = history.listen(({action, location}) => {
     const state = location.state as HistoryState | undefined;
     const index = state?.index || 0;
+
+    if (action === 'POP') {
+      const blocked = blockedPop(
+        router as RouterInstance<any>,
+        location,
+        index
+      );
+      // A blocker veto runs before anything else: the POP is rewound
+      // with a counter-`go()`, so neither the view nor the in-flight
+      // chain may observe it.
+      if (blocked === 'vetoed') return;
+      if (blocked === 'rewind') {
+        // The rewind's landing: an entry the router never left. The
+        // stacks and the landed entry's window state are already
+        // correct — no sync replace — and no `cancel()` either: an
+        // in-flight chain must survive the bounced POP. Re-announce
+        // the current view only when a snapshot exists; an
+        // invalidate()d slot emits nothing and the host keeps its
+        // retained view, exactly like invalidate() itself — a lazy
+        // refresh here would supersede the very chain this branch
+        // protects.
+        const view = viewAt(router, index);
+        if (view) onViewChange(view);
+        lastSettled.set(router, {index, location});
+        return;
+      }
+    }
+
+    cancel(router);
     const view = viewAt(router, index);
 
     onViewChange(view);
@@ -921,6 +1133,7 @@ export function listen<R extends BaseRoute = BaseRoute, V = any>(
         ...serializeStack(router)
       });
     }
+    lastSettled.set(router, {index, location});
   });
 
   history.replace(createPath(history.location), history.location.state);

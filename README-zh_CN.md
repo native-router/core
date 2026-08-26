@@ -70,6 +70,7 @@ commit(router, entry.task, entry.location); // 像点击一样提交
 - 基于 path-to-regexp 的路由匹配：声明序匹配、无 `path` 布局路由、`path: ''` 索引/兜底子路由、尾部斜杠敏感、区分大小写、嵌套参数深层覆盖浅层
 - 路由守卫：每层路由支持静态 `redirect` 与异步 `beforeLoad`，按浅层到深层执行；连续重定向超过 10 次以 `RedirectLoopError` 拒绝
 - 可取消的异步导航：新的解析取代进行中的解析（`currentGuard`）；`cancel()` 主动中止；history POP 也会取消。被取代或被取消的 `navigate()` 返回的 promise **永远不会 settle**——不要 `await` 可能被取代的导航。取代/取消同时会 abort 该导航链的 `AbortSignal`：守卫（`beforeLoad` ctx）与视图加载器（`ResolveViewContext`）通过 `ctx.signal` 收到它，进行中的请求真正停止而非仅丢弃结果；`preload` 的解析因多方共享不会被 abort
+- 导航拦截器：`setBlocker(router, fn)` 注册同步的 `(to, from) => boolean` 否决谓词（入参为路径字符串），在每条 `navigate`/`commit`/`commitReplace` 链头与每个 history POP 落地前询问；被否决的导航不会启动，其 promise 立即 resolve（否决不是错误——与永不 settle 的被取消导航不同），被否决的 POP 以反向 `go()` 回退、且不影响进行中的导航——经典的未保存提醒守卫。`refresh` 与守卫重定向永不被阻塞
 - 导航 API：`navigate`、`refresh`、`go`/`forward`/`back`、`commit`/`commitReplace`、`createHref`、`getParams`、`match`、`toLocation`、`resolve`、`resolveTo`
 - `invalidate(router)`：一次性丢弃会话视图快照——当前视图保持渲染（不重解析、不重渲染），下一次前进/后退经守卫重新解析；典型调用点是登出/切换账号之后，防止 POP 回退渲染上一账号数据或绕过会话内已执行过的守卫
 - 基于 [Standard Schema](https://standardschema.dev) 的 search 校验：任意路由层可声明 `search` 校验器（zod/valibot/arktype，无硬依赖），用 `parseSearch`/`parseSearchSync` 解析；失败抛出 `SearchError`
