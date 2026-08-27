@@ -108,8 +108,9 @@ const router = create(
 );
 ```
 
-- `parseSearchInput(search)` degrades a query string into a plain object — single-valued keys are strings, keys repeated in the query are arrays — which is also the input every schema validates
-- `parseSearch(schema, search)` resolves the schema output (async validators are awaited); `parseSearchSync` is the render/guard-time flavor and rejects async validators with a clear error
+- `parseSearchInput(search)` degrades a query string into a plain object — single-valued keys are strings, keys repeated in the query string are arrays — which is also the input every schema validates
+- `parseSearch(schema, search)` resolves the schema output (async validators are awaited); `parseSearchSync` is the render-time flavor and rejects async validators with a clear error
+- Guards: `beforeLoad` receives the level's parsed search as `ctx.search` — the schema output (parsed with `parseSearch`, so async validators work), or the degraded input on schema-less levels; an invalid search fails the resolution through the `errorHandler` channel like a data-phase search error
 - A rejected validation throws `SearchError` (a `NativeRouterError`) carrying the raw `search` and the reported `issues` — route it through your `errorHandler` like any other resolve failure
 
 ## Design principles

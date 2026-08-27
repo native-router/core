@@ -2317,4 +2317,81 @@ describe('search', () => {
     await navigate(router, '/list?page=0');
     getCurrentView(router).should.equal('fallback:expected a positive integer');
   });
+
+  it('should hand beforeLoad the parsed schema search, sync or async', async () => {
+    const seen: unknown[] = [];
+    const history = createMemoryHistory({initialEntries: ['/']});
+    const routes: BaseRoute[] = [
+      {
+        path: '',
+        children: [
+          {
+            path: '/list',
+            search: pageSchema,
+            beforeLoad: ({search}) => {
+              seen.push(search);
+            }
+          },
+          {
+            path: '/async',
+            search: asyncSchema,
+            beforeLoad: ({search}) => {
+              seen.push(search);
+            }
+          }
+        ]
+      }
+    ];
+    const router = create(
+      routes,
+      history,
+      (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+    );
+    await navigate(router, '/list?page=3');
+    await navigate(router, '/async?page=5');
+    // The guard sees the coerced schema output, not the raw strings.
+    seen.should.deepEqual([{page: 3}, {page: 5}]);
+  });
+
+  it('should hand beforeLoad the degraded input on schema-less routes', async () => {
+    const seen: unknown[] = [];
+    const history = createMemoryHistory({initialEntries: ['/']});
+    const router = create(
+      {
+        path: '',
+        children: [
+          {
+            path: '/plain',
+            beforeLoad: ({search}) => {
+              seen.push(search);
+            }
+          }
+        ]
+      },
+      history,
+      (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+    );
+    await navigate(router, '/plain?page=2&tag=a&tag=b');
+    seen.should.deepEqual([{page: '2', tag: ['a', 'b']}]);
+  });
+
+  it('should fail a guarded navigation when the search is invalid', async () => {
+    const history = createMemoryHistory({initialEntries: ['/']});
+    const routes: BaseRoute[] = [
+      {path: '', children: [{path: '/list', search: pageSchema, beforeLoad: () => undefined}]}
+    ];
+    const router = create(
+      routes,
+      history,
+      (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`),
+      {
+        errorHandler: (e) =>
+          `fallback:${e instanceof SearchError ? e.issues[0].message : e}`
+      }
+    );
+    // The parse runs before the guard phase, so the failure rides the
+    // same errorHandler channel a data-phase search error would.
+    await navigate(router, '/list?page=abc');
+    getCurrentView(router).should.equal('fallback:expected a positive integer');
+  });
 });

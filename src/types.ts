@@ -249,11 +249,20 @@ export type ExtractPathParams<P extends string> =
  * owns the guard, so a guard only sees params of itself and its parents.
  */
 // eslint-disable-next-line no-use-before-define -- generic default referencing a type declared below
-export type GuardContext<R extends BaseRoute = BaseRoute> = {
+export type GuardContext<R extends BaseRoute = BaseRoute, S = unknown> = {
   // eslint-disable-next-line no-use-before-define
   router: RouterInstance<R>;
   location: Location;
   params: Record<string, string>;
+  /**
+   * The search the guard sees: the route's {@link BaseRoute.search search
+   * schema} output(parsed and validated before the guard runs), or the
+   * degraded {@link SearchInput} when the route declares no schema. The
+   * loose default types it `unknown` — narrow it in the guard, or let a
+   * typed route table(see `createRoutes` of `@native-router/react`)
+   * derive it from the schema.
+   */
+  search: S;
   /**
    * Aborted when this navigation is superseded by a newer one or
    * cancelled(see {@link RouterInstance.cancelAll cancel}); pass it to
@@ -281,7 +290,11 @@ export type BaseRoute<T = any> = {
   search?: StandardSchemaV1;
   /**
    * Route guard invoked before the view resolves. Return a path string
-   * to redirect, or nothing(`undefined`) to continue.
+   * to redirect, or nothing(`undefined`) to continue. The guard's
+   * {@link GuardContext context} carries the level's parsed
+   * {@link GuardContext.search search}(schema output, or the degraded
+   * input without a schema); an invalid search fails the resolution at
+   * this phase like any other navigation error.
    */
   beforeLoad?(ctx: GuardContext<BaseRoute<T>>): Awaitable<string | void>;
 } & Omit<T, 'path' | 'children'>;

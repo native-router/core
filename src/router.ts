@@ -1,6 +1,7 @@
 import {createPath, History, parsePath} from 'history';
 import {match as createMatcher} from 'path-to-regexp';
 import type {
+  Awaitable,
   Location,
   Matched,
   Options,
@@ -9,6 +10,7 @@ import type {
   ResolveView,
   HistoryState
 } from './types';
+import {parseSearch, parseSearchInput} from './search';
 import {createCurrentGuard, noop, reject} from './util';
 import {NotFoundError, RedirectLoopError} from './errors';
 
@@ -357,6 +359,11 @@ export function resolveTo<R extends BaseRoute = BaseRoute, V = any>(
  * aborts — their resolution may be shared, so cancelling it on behalf of
  * one consumer is not sound yet.
  *
+ * A guard's context also carries the level's parsed
+ * {@link GuardContext.search search}: the {@link BaseRoute.search schema}
+ * output(its validation failure rejects this resolution with a
+ * `SearchError`), or the degraded input without a schema.
+ *
  * @group Methods
  * @category Router
  * @param router router instance
@@ -394,15 +401,38 @@ export async function resolveEntry<R extends BaseRoute = BaseRoute, V = any>(
       const {route} = matched[i];
       // `redirect` wins over `beforeLoad`; a non-empty string target
       // restarts the resolution at the redirected location.
-      const target =
-        route.redirect ??
+      let target: string | Awaitable<string | void> | undefined =
+        route.redirect;
+      if (!target && route.beforeLoad) {
+        // The level's search schema runs before its guard, so the guard
+        // sees the parsed output(degraded input without a schema). A
+        // validation failure fails the resolution through the task's
+        // errorHandler channel — the same route a data-phase search
+        // error takes — instead of rejecting this entry, which preload
+        // consumers share.
+        let search: unknown;
+        if (route.search) {
+          try {
+            // eslint-disable-next-line no-await-in-loop -- guards must run in declaration order, sequentially
+            search = await parseSearch(route.search, location.search);
+          } catch (e) {
+            return {
+              location,
+              task: Promise.reject(e).catch(errorHandler)
+            };
+          }
+        } else {
+          search = parseSearchInput(location.search);
+        }
         // eslint-disable-next-line no-await-in-loop -- guards must run in declaration order, sequentially
-        (await route.beforeLoad?.({
+        target = await route.beforeLoad({
           router,
           location,
           params: mergeMatchedParams(matched, i),
-          signal
-        }));
+          signal,
+          search
+        });
+      }
       if (target) {
         location = toLocation(router, target, location.state);
         redirected = true;

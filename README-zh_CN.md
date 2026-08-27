@@ -109,7 +109,8 @@ const router = create(
 ```
 
 - `parseSearchInput(search)` 把查询串退化为普通对象——单值键是字符串，查询串中重复的键是数组——它同时也是所有 schema 校验的输入
-- `parseSearch(schema, search)` 解析出 schema 输出（异步校验器会被 await）；`parseSearchSync` 是渲染/守卫时机的同步版本，遇到异步校验器会抛出明确的错误
+- `parseSearch(schema, search)` 解析出 schema 输出（异步校验器会被 await）；`parseSearchSync` 是渲染时机的同步版本，遇到异步校验器会抛出明确的错误
+- 守卫：`beforeLoad` 以 `ctx.search` 收到该层解析后的 search——schema 输出（经 `parseSearch` 解析，异步校验器可用），无 schema 的层退化为输入对象；校验不通过时与 data 阶段的 search 错误一样走 `errorHandler` 通道
 - 校验不通过抛出 `SearchError`（`NativeRouterError` 的子类），携带原始 `search` 与 schema 报告的 `issues`——像其他解析失败一样交给 `errorHandler` 处理
 
 ## 设计原则
