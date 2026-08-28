@@ -74,5 +74,12 @@
     /* Advanced Options */
     "skipLibCheck": true,                     /* Skip type checking of declaration files. */
     "forceConsistentCasingInFileNames": true  /* Disallow inconsistently-cased references to the same file. */
-  }
+  },
+  "exclude": [
+    "node_modules",
+    "dist",
+    // 工具配置（非库产物）：其导出类型的 declaration emit 需引用 @eslint/core / rollup 内部类型，无法可移植命名（TS2883）
+    "eslint.config.mjs",
+    "rollup.config.mjs"
+  ]
 }

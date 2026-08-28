@@ -38,7 +38,6 @@ export interface StandardSchemaV1<Input = unknown, Output = Input> {
   readonly '~standard': StandardSchemaV1.Props<Input, Output>;
 }
 
-/* eslint-disable no-use-before-define -- namespace members reference siblings defined below, verbatim from @standard-schema/spec */
 export declare namespace StandardSchemaV1 {
   export interface Props<Input = unknown, Output = Input> {
     /** The version number of the standard. */
@@ -77,7 +76,6 @@ export declare namespace StandardSchemaV1 {
     readonly key: PropertyKey;
   }
 }
-/* eslint-enable no-use-before-define */
 
 /**
  * The plain input object a search string degrades into before schema
@@ -176,8 +174,7 @@ type SegmentParamsOf<Seg extends string> =
       : Char extends ':' | '*'
         ? Rest extends `${infer First}${infer Rest2}`
           ? First extends ParamStartChar
-            ? // eslint-disable-next-line no-use-before-define -- mutually recursive with the name scanner
-              ParamNameOf<Rest2, First, Char extends '*' ? 'wildcard' : 'param'>
+            ? ParamNameOf<Rest2, First, Char extends '*' ? 'wildcard' : 'param'>
             : {} // Empty/quoted/digit-led name: runtime throws
           : {} // Trailing bare `:` or `*`
         : SegmentParamsOf<Rest>
@@ -248,9 +245,8 @@ export type ExtractPathParams<P extends string> =
  * `params` are accumulated from the root level down to the level that
  * owns the guard, so a guard only sees params of itself and its parents.
  */
-// eslint-disable-next-line no-use-before-define -- generic default referencing a type declared below
+
 export type GuardContext<R extends BaseRoute = BaseRoute, S = unknown> = {
-  // eslint-disable-next-line no-use-before-define
   router: RouterInstance<R>;
   location: Location;
   params: Record<string, string>;
@@ -304,7 +300,6 @@ export type Matched<R extends BaseRoute = BaseRoute> = {route: R} & MatchResult<
 >;
 
 export type ResolveViewContext<R extends BaseRoute> = {
-  // eslint-disable-next-line no-use-before-define
   router: RouterInstance<R>;
   location: Location;
   /**

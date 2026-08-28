@@ -2342,10 +2342,8 @@ describe('search', () => {
         ]
       }
     ];
-    const router = create(
-      routes,
-      history,
-      (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+    const router = create(routes, history, (matched) =>
+      Promise.resolve(`view:${matched.at(-1)!.path}`)
     );
     await navigate(router, '/list?page=3');
     await navigate(router, '/async?page=5');
@@ -2378,7 +2376,12 @@ describe('search', () => {
   it('should fail a guarded navigation when the search is invalid', async () => {
     const history = createMemoryHistory({initialEntries: ['/']});
     const routes: BaseRoute[] = [
-      {path: '', children: [{path: '/list', search: pageSchema, beforeLoad: () => undefined}]}
+      {
+        path: '',
+        children: [
+          {path: '/list', search: pageSchema, beforeLoad: () => undefined}
+        ]
+      }
     ];
     const router = create(
       routes,
