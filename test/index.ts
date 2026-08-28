@@ -253,26 +253,163 @@ describe('Router', () => {
   });
 
   describe('go', () => {
-    it('should navigate in history stack', () => {
-      // Test code here
+    it('should navigate in history stack', async () => {
+      const tick = () =>
+        new Promise((done) => {
+          setTimeout(done);
+        });
+      const history = createMemoryHistory({initialEntries: ['/foo']});
+      let count = 0;
+      const resolveView = sinon.fake((matched: any[]) =>
+        Promise.resolve(`view:${matched.at(-1)!.path}:${++count}`)
+      );
+      const router = create(
+        {path: '', children: [{path: '/foo'}, {path: '/bar'}, {path: '/baz'}]},
+        history,
+        resolveView
+      );
+      const views: string[] = [];
+      listen(router, (v) => views.push(v as string));
+      await tick();
+
+      await navigate(router, '/bar');
+      await navigate(router, '/baz');
+      // The initial warm-up refresh plus the two navigations.
+      resolveView.callCount.should.equal(3);
+
+      // A two-slot back POP lands on /foo through the viewStack snapshot:
+      // listen fires with the committed view, zero new resolves.
+      go(router, -2);
+      history.location.pathname.should.equal('/foo');
+      views.at(-1)!.should.equal('view:/foo:1');
+      resolveView.callCount.should.equal(3);
+
+      // A one-slot forward POP hits the /bar snapshot the same way.
+      go(router, 1);
+      history.location.pathname.should.equal('/bar');
+      views.at(-1)!.should.equal('view:/bar:2');
+      resolveView.callCount.should.equal(3);
+
+      // The in-memory window survived both POPs untouched.
+      router.locationStack
+        .map((l) => l.pathname)
+        .should.deepEqual(['/foo', '/bar', '/baz']);
+      router.viewStack.should.deepEqual([
+        'view:/foo:1',
+        'view:/bar:2',
+        'view:/baz:3'
+      ]);
     });
   });
 
   describe('forward', () => {
-    it('should forward in history stack', () => {
-      // Test code here
+    it('should forward in history stack', async () => {
+      const tick = () =>
+        new Promise((done) => {
+          setTimeout(done);
+        });
+      const history = createMemoryHistory({initialEntries: ['/foo']});
+      let count = 0;
+      const resolveView = sinon.fake((matched: any[]) =>
+        Promise.resolve(`view:${matched.at(-1)!.path}:${++count}`)
+      );
+      const router = create(
+        {path: '', children: [{path: '/foo'}, {path: '/bar'}]},
+        history,
+        resolveView
+      );
+      const views: string[] = [];
+      listen(router, (v) => views.push(v as string));
+      await tick();
+
+      await navigate(router, '/bar');
+      // The warm-up refresh plus one navigation.
+      resolveView.callCount.should.equal(2);
+
+      back(router);
+      history.location.pathname.should.equal('/foo');
+      views.at(-1)!.should.equal('view:/foo:1');
+
+      // The forward POP re-serves the committed /bar view from the
+      // viewStack snapshot without a new resolve.
+      forward(router);
+      history.location.pathname.should.equal('/bar');
+      views.at(-1)!.should.equal('view:/bar:2');
+      resolveView.callCount.should.equal(2);
+      (history.location.state as HistoryState).index.should.equal(1);
     });
   });
 
   describe('back', () => {
-    it('should go back in history stack', () => {
-      // Test code here
+    it('should go back in history stack', async () => {
+      const tick = () =>
+        new Promise((done) => {
+          setTimeout(done);
+        });
+      const history = createMemoryHistory({initialEntries: ['/foo']});
+      let count = 0;
+      const resolveView = sinon.fake((matched: any[]) =>
+        Promise.resolve(`view:${matched.at(-1)!.path}:${++count}`)
+      );
+      const router = create(
+        {path: '', children: [{path: '/foo'}, {path: '/bar'}]},
+        history,
+        resolveView
+      );
+      const views: string[] = [];
+      listen(router, (v) => views.push(v as string));
+      await tick();
+
+      await navigate(router, '/bar');
+      resolveView.callCount.should.equal(2);
+
+      // The back POP lands on the previous entry and serves its committed
+      // view from the viewStack snapshot: listen fires, zero new resolves.
+      back(router);
+      history.location.pathname.should.equal('/foo');
+      views.at(-1)!.should.equal('view:/foo:1');
+      resolveView.callCount.should.equal(2);
+
+      // The POP synced the current window into the landed entry, so a
+      // later refresh still restores the whole in-window stack.
+      const state = history.location.state as HistoryState;
+      state.index.should.equal(0);
+      state.base!.should.equal(0);
+      state
+        .locationStack!.map((l) => l.pathname)
+        .should.deepEqual(['/foo', '/bar']);
+      router.viewStack.should.deepEqual(['view:/foo:1', 'view:/bar:2']);
     });
   });
 
   describe('createHref', () => {
-    it('should create href of a route path', () => {
-      // Test code here
+    it('should create href of a route path', async () => {
+      const tick = () =>
+        new Promise((done) => {
+          setTimeout(done);
+        });
+      const history = createMemoryHistory({initialEntries: ['/app/foo']});
+      const router = create(
+        {path: '', children: [{path: '/foo'}, {path: '/bar'}]},
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`),
+        {baseUrl: '/app'}
+      );
+      listen(router, () => undefined);
+      await tick();
+
+      // The baseUrl prefixes history's own href; search and hash ride along.
+      createHref(router, '/bar').should.equal('/app/bar');
+      createHref(router, '/bar?x=1').should.equal('/app/bar?x=1');
+      createHref(router, '/bar?x=1#top').should.equal('/app/bar?x=1#top');
+
+      // Round-trip with toLocation: the href points back at the same
+      // pathname the router would commit for the same `to`.
+      const location = toLocation(router, '/bar?x=1#top');
+      location.pathname.should.equal('/app/bar');
+      createHref(router, '/bar?x=1#top').should.equal(
+        location.pathname + location.search + location.hash
+      );
     });
   });
 
@@ -282,8 +419,78 @@ describe('Router', () => {
         setTimeout(done);
       });
 
-    it('should cancel the current navigate', () => {
-      // Test code here
+    it('should cancel the current navigate', async () => {
+      const park = new Promise<undefined>(() => {});
+      const guardSignals: AbortSignal[] = [];
+      const viewSignals: AbortSignal[] = [];
+      const history = createMemoryHistory({initialEntries: ['/']});
+      const router = create(
+        {
+          path: '',
+          children: [
+            {path: '/'},
+            {
+              path: '/slow',
+              beforeLoad({signal}) {
+                guardSignals.push(signal);
+                // Slow guard: never settles on its own.
+                return park;
+              }
+            }
+          ]
+        },
+        history,
+        (matched, {signal}) => {
+          viewSignals.push(signal);
+          return Promise.resolve(`view:${matched.at(-1)!.path}`);
+        }
+      );
+      const views: string[] = [];
+      listen(router, (v) => views.push(v as string));
+      await tick();
+      // listen's initial replace lazily warms the current entry up.
+      const viewsBefore = [...views];
+      viewsBefore.at(-1)!.should.equal('view:/');
+
+      let settled = false;
+      const inflight = navigate(router, '/slow').then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        }
+      );
+      (router.resolving !== undefined).should.be.true();
+
+      cancel(router);
+
+      // The cancelled chain's promise never settles: race it against a
+      // short timer a few times to prove neither fulfillment nor
+      // rejection fires.
+      for (let i = 0; i < 3; i++) {
+        await Promise.race([inflight, tick()]);
+        settled.should.be.false();
+        await tick();
+      }
+
+      // The in-flight mark is gone and the guard's signal was aborted
+      // synchronously with cancel().
+      (router.resolving === undefined).should.be.true();
+      guardSignals.should.have.length(1);
+      guardSignals[0]!.aborted.should.be.true();
+
+      // The parked chain never reached its view phase(the only view
+      // task is the warm-up refresh's), and no view was announced.
+      viewSignals.should.have.length(1);
+      history.location.pathname.should.equal('/');
+      views.should.deepEqual(viewsBefore);
+
+      // A later navigation works normally on the clean router.
+      await navigate(router, '/');
+      history.location.pathname.should.equal('/');
+      views.at(-1)!.should.equal('view:/');
+      (router.resolving === undefined).should.be.true();
     });
 
     it('should clear the in-flight mark so a later navigate fires no spurious cancel signal', async () => {
