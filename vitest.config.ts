@@ -4,7 +4,7 @@ export default defineConfig({
   test: {
     environment: 'node',
     globals: true,
-    include: ['test/index.ts'],
+    include: ['test/index.ts', 'test/types.test.ts'],
     setupFiles: ['./test/setup.ts'],
     coverage: {
       provider: 'v8',

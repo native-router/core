@@ -141,6 +141,8 @@ const router = create(
 
 - No `params` schema → behavior unchanged: the raw string map flows through
 - The parse runs per level (shallow → deep): a level's schema validates the params merged up to it; a deeper schema sees the (possibly coerced) output of the shallower ones
+- A `redirect` level skips its params schema entirely — the level's guard never runs, so there is nothing to hand coerced params to; the same asymmetry the search schema has (`redirect` wins over `beforeLoad`). Hanging a params schema on a redirect level is inert, it cannot fail the navigation
+- A same-name param on both a parent and a child segment (`/users/:id/files/:id`): the deep-over-shallow merge operates on the **raw** strings, so the child segment's value overwrites the parent's coerced one — a child guard sees the raw string again. Declare the coercing schema on (or below) the deepest level that reads the param — a deeper schema validates the whole merged map anyway — or avoid reusing a param name across levels
 - A rejected validation fails the resolution through the `errorHandler` channel with a `ParamsError` (a `NativeRouterError`) carrying the raw `params` and the reported `issues` — the same route a search-schema failure takes
 - `parseParams`/`parseParamsSync` are exported for custom `resolveView` implementations (the async/sync flavors mirror `parseSearch`/`parseSearchSync`)
 

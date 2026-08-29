@@ -244,9 +244,21 @@ export type ExtractPathParams<P extends string> =
  * Context passed to a route guard({@link BaseRoute.beforeLoad beforeLoad}).
  * `params` are accumulated from the root level down to the level that
  * owns the guard, so a guard only sees params of itself and its parents.
+ *
+ * Type arguments: `S` types {@link GuardContext.search search}(schema
+ * output, or the degraded input without a schema), `P` types
+ * {@link GuardContext.params params}. Both default to what a
+ * schema-less route produces — `search: unknown`, `params: the raw
+ * string map` — so plain guards keep compiling unchanged; thread a
+ * params schema's coerced output through `P` to type what the guard
+ * actually receives at runtime.
  */
 
-export type GuardContext<R extends BaseRoute = BaseRoute, S = unknown> = {
+export type GuardContext<
+  R extends BaseRoute = BaseRoute,
+  S = unknown,
+  P = Record<string, string>
+> = {
   router: RouterInstance<R>;
   location: Location;
   /**
@@ -254,9 +266,13 @@ export type GuardContext<R extends BaseRoute = BaseRoute, S = unknown> = {
    * declares a {@link BaseRoute.params params schema}, the merged raw
    * params are parsed through the deepest matching schema before the
    * guard runs; without schemas the raw string map the matcher
-   * extracted.
+   * extracted. The loose default models the raw map; give the third
+   * type argument the schema's output(`GuardContext<R, S, {id: number}>`
+   * for a `z.coerce.number()` id) — the runtime value is the parse
+   * result, which a coercing schema makes anything but
+   * `Record<string, string>`.
    */
-  params: Record<string, string>;
+  params: P;
   /**
    * The search the guard sees: the route's {@link BaseRoute.search search
    * schema} output(parsed and validated before the guard runs), or the
@@ -297,7 +313,9 @@ export type BaseRoute<T = any> = {
    * runs it in {@link resolveEntry} after matching and before the level's
    * `beforeLoad`, so guards and loaders see coerced params(e.g. `:id`
    * as a number) instead of raw strings; a validation failure fails the
-   * resolve like any other navigation error(via `ParamsError`).
+   * resolve like any other navigation error(via `ParamsError`). A level
+   * with a {@link BaseRoute.redirect redirect} skips the schema — the
+   * guard never runs there, so the schema would have no consumer.
    *
    * Omit it and the params stay the raw `Record<string, string>` the
    * matcher extracted — behavior is unchanged.

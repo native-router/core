@@ -141,6 +141,8 @@ const router = create(
 
 - 不声明 `params` → 行为不变：原始字符串照常下发
 - 逐层解析（浅 → 深）：每层的 schema 校验合并到该层为止的 params；更深一层的 schema 看到的是浅层（可能已 coerce）的输出
+- `redirect` 层会整体跳过其 params schema——该层守卫本就不会运行，coerce 结果无处可去；与 search schema 的不对称一致（`redirect` 优先于 `beforeLoad`）。在 redirect 层挂 params schema 是惰性的，不会导致导航失败
+- 父子层级同名参数段（`/users/:id/files/:id`）：深层覆盖浅层的合并作用在**原始字符串**上——子层段的值会覆盖父层已 coerce 的结果，子层守卫重新拿到原始 string。把 coerce schema 声明在读取该参数的最深层或更深层（更深的 schema 校验的本就是整个合并后的 map），或避免跨层复用参数名
 - 校验不通过走 `errorHandler` 通道抛出 `ParamsError`（`NativeRouterError` 的子类），携带原始 `params` 与 `issues`——与 search schema 失败同一条路
 - `parseParams`/`parseParamsSync` 一并导出，供自定义 `resolveView` 使用（异步/同步版本对应 `parseSearch`/`parseSearchSync`）
 

@@ -34,7 +34,8 @@
     "lint": "eslint --fix src test *.js",
     "doc:gen": "typedoc",
     "deploy": "npm run doc:gen && gh-pages -d dist",
-    "test": "vitest run"
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit"
   },
   "repository": {
     "type": "git",

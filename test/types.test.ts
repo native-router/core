@@ -1,0 +1,61 @@
+/**
+ * Compile-time contracts of the exported types. Vitest runs this file as
+ * a passing no-op(`expectTypeOf` is erased at runtime); the assertions
+ * are enforced by `npm run typecheck`(`tsc -p tsconfig.test.json`).
+ */
+import {describe, it, expectTypeOf} from 'vitest';
+import type {BaseRoute, GuardContext, StandardSchemaV1} from '../src/index';
+
+describe('GuardContext', () => {
+  it('should default params to the raw string map', () => {
+    expectTypeOf<GuardContext['params']>().toEqualTypeOf<
+      Record<string, string>
+    >();
+    // The two-argument instantiation framework layers already use
+    // (router, search output) keeps that meaning: params stay the
+    // default raw map.
+    expectTypeOf<
+      GuardContext<BaseRoute, {q: string}>['params']
+    >().toEqualTypeOf<Record<string, string>>();
+  });
+
+  it('should type params as the schema output through the third argument', () => {
+    expectTypeOf<
+      GuardContext<BaseRoute, unknown, {id: number}>['params']
+    >().toEqualTypeOf<{id: number}>();
+  });
+
+  it('should accept a coerced params value only through the output generic', () => {
+    const coerced = {id: 1};
+    // The reviewer's TS2322: a coercing schema's output is not
+    // assignable to the loose default's `Record<string, string>`.
+    // @ts-expect-error number is not string
+    const loose: GuardContext['params'] = coerced;
+    // Expressed through the third type argument it fits.
+    const typed: GuardContext<BaseRoute, unknown, {id: number}>['params'] =
+      coerced;
+    expectTypeOf(loose).toEqualTypeOf<Record<string, string>>();
+    expectTypeOf(typed).toEqualTypeOf<{id: number}>();
+  });
+
+  it('should type a schema-declaring guard through an annotated context', () => {
+    // The runtime hands the guard the schema's coerced output; the
+    // output generic is the only way the static type says so.
+    const idSchema: StandardSchemaV1<unknown, {id: number}> = {
+      '~standard': {
+        version: 1,
+        vendor: 'test',
+        validate: (value) => ({
+          value: {id: Number((value as {id: string}).id)}
+        })
+      }
+    };
+    const guard = (ctx: GuardContext<BaseRoute, unknown, {id: number}>) => {
+      const {id} = ctx.params;
+      expectTypeOf(id).toBeNumber();
+      return id > 0 ? undefined : '/users';
+    };
+    expectTypeOf(idSchema).toExtend<StandardSchemaV1>();
+    expectTypeOf(guard).toBeFunction();
+  });
+});

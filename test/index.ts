@@ -476,8 +476,10 @@ describe('Router', () => {
       // short timer a few times to prove neither fulfillment nor
       // rejection fires.
       for (let i = 0; i < 3; i++) {
+        // eslint-disable-next-line no-await-in-loop -- each round must observe the timer's non-settlement before the next
         await Promise.race([inflight, tick()]);
         settled.should.be.false();
+        // eslint-disable-next-line no-await-in-loop -- settle the timer before the next observation round
         await tick();
       }
 
@@ -2820,6 +2822,58 @@ describe('params', () => {
     await navigate(router, '/users/abc');
     getCurrentView(router).should.equal('fallback:expected a positive integer');
     history.location.pathname.should.equal('/users/abc');
+  });
+
+  it('should skip a failing params schema on a redirect level', async () => {
+    const history = createMemoryHistory({initialEntries: ['/']});
+    const routes: BaseRoute[] = [
+      {
+        path: '',
+        children: [
+          // The redirect level never runs its guard, so its schema must
+          // not run either — matching the search schema's redirect
+          // asymmetry. Navigating with unparseable params redirects
+          // instead of failing through the errorHandler channel.
+          {path: '/users/:id', params: idSchema, redirect: '/users'},
+          {path: '/users'}
+        ]
+      }
+    ];
+    const router = create(routes, history, (matched) =>
+      Promise.resolve(`view:${matched.at(-1)!.path}`)
+    );
+    await navigate(router, '/users/abc');
+    history.location.pathname.should.equal('/users');
+    getCurrentView(router).should.equal('view:/users');
+  });
+
+  it('should let a child same-name segment overwrite the parent coerced value', async () => {
+    // `/users/:id/files/:id`: the parent schema coerces its `id`, then
+    // the child segment's RAW string overwrites it in the merge — the
+    // documented deep-over-shallow semantics operate on raw params, so
+    // coercion must be declared on (or below) the deepest level that
+    // reads the param.
+    const seen: unknown[] = [];
+    const history = createMemoryHistory({initialEntries: ['/']});
+    const routes: BaseRoute[] = [
+      {
+        path: '/users/:id',
+        params: idSchema,
+        children: [
+          {
+            path: '/files/:id',
+            beforeLoad: ({params}) => {
+              seen.push(params);
+            }
+          }
+        ]
+      }
+    ];
+    const router = create(routes, history, (matched) =>
+      Promise.resolve(`view:${matched.at(-1)!.path}`)
+    );
+    await navigate(router, '/users/1/files/9');
+    seen.should.deepEqual([{id: '9'}]);
   });
 
   it('should validate a wildcard param through the merged string map', async () => {

@@ -410,11 +410,16 @@ export async function resolveEntry<R extends BaseRoute = BaseRoute, V = any>(
       const {route} = matched[i];
       params = {...params, ...matched[i].params};
       // The level's params schema runs before its guard, so the guard
-      // sees the coerced output. A validation failure fails the
-      // resolution through the task's errorHandler channel — the same
-      // route a search-schema failure takes — instead of rejecting this
-      // entry, which preload consumers share.
-      if (route.params) {
+      // sees the coerced output. A redirect level never runs its guard,
+      // so its schema is skipped — the same asymmetry the level's
+      // search schema already has(`redirect` wins over `beforeLoad`):
+      // hanging a params schema on a redirect level must not be able to
+      // fail the navigation, its only observable effect would be the
+      // failure. A validation failure fails the resolution through the
+      // task's errorHandler channel — the same route a search-schema
+      // failure takes — instead of rejecting this entry, which preload
+      // consumers share.
+      if (route.params && !route.redirect) {
         try {
           // eslint-disable-next-line no-await-in-loop -- guards must run in declaration order, sequentially
           params = (await parseParams(route.params, params)) as Record<
