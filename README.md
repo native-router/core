@@ -113,6 +113,37 @@ const router = create(
 - Guards: `beforeLoad` receives the level's parsed search as `ctx.search` — the schema output (parsed with `parseSearch`, so async validators work), or the degraded input on schema-less levels; an invalid search fails the resolution through the `errorHandler` channel like a data-phase search error
 - A rejected validation throws `SearchError` (a `NativeRouterError`) carrying the raw `search` and the reported `issues` — route it through your `errorHandler` like any other resolve failure
 
+## Params validation
+
+Params are always strings (wildcards: string arrays) — the URL has no types. Declare a `params` schema on a route level and the core validates/coerces the merged params of that level before its `beforeLoad` runs, so guards see numbers instead of `Number(id)` everywhere.
+
+```ts
+import {create} from '@native-router/core';
+import {z} from 'zod';
+
+const router = create(
+  {
+    path: '',
+    children: [
+      {
+        path: '/users/:id',
+        params: z.object({id: z.coerce.number().int().positive()}),
+        beforeLoad: ({params}) => {
+          params.id; // number — coerced, or the navigation failed
+        }
+      }
+    ]
+  },
+  createBrowserHistory(),
+  (matched) => renderUser(matched)
+);
+```
+
+- No `params` schema → behavior unchanged: the raw string map flows through
+- The parse runs per level (shallow → deep): a level's schema validates the params merged up to it; a deeper schema sees the (possibly coerced) output of the shallower ones
+- A rejected validation fails the resolution through the `errorHandler` channel with a `ParamsError` (a `NativeRouterError`) carrying the raw `params` and the reported `issues` — the same route a search-schema failure takes
+- `parseParams`/`parseParamsSync` are exported for custom `resolveView` implementations (the async/sync flavors mirror `parseSearch`/`parseSearchSync`)
+
 ## Design principles
 
 **Navigation semantics follow the browser** — native-router aligns with browser-native navigation semantics, not with what other SPA routers happen to do. Every navigation API decision is measured against that yardstick; "a popular router has it" is not, by itself, a reason to follow. These are deliberate choices, not bugs to fix.

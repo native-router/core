@@ -31,10 +31,17 @@ import type {
   HistoryState,
   StandardSchemaV1
 } from '../src/types';
-import {parseSearch, parseSearchInput, parseSearchSync} from '../src/search';
+import {
+  parseParams,
+  parseParamsSync,
+  parseSearch,
+  parseSearchInput,
+  parseSearchSync
+} from '../src/search';
 import {
   NativeRouterError,
   NotFoundError,
+  ParamsError,
   RedirectLoopError,
   SearchError
 } from '../src/errors';
@@ -2603,5 +2610,256 @@ describe('search', () => {
     // same errorHandler channel a data-phase search error would.
     await navigate(router, '/list?page=abc');
     getCurrentView(router).should.equal('fallback:expected a positive integer');
+  });
+});
+
+describe('params', () => {
+  /** Minimal Standard Schema fixture: coerces `id` into a positive integer. */
+  const idSchema: StandardSchemaV1<unknown, {id: number}> = {
+    '~standard': {
+      version: 1,
+      vendor: 'test',
+      validate(value) {
+        const {id} = value as {id?: unknown};
+        const parsed = Number(id);
+        return Number.isInteger(parsed) && parsed >= 1
+          ? {value: {id: parsed}}
+          : {
+              issues: [{message: 'expected a positive integer', path: ['id']}]
+            };
+      }
+    }
+  };
+
+  /**
+   * Fixture validating the whole merged map (`userId` + `postId`) the way
+   * a real zod object schema would — every key coerced in one pass.
+   */
+  const mergedSchema: StandardSchemaV1<
+    unknown,
+    {userId: number; postId: number}
+  > = {
+    '~standard': {
+      version: 1,
+      vendor: 'test',
+      validate(value) {
+        const {userId, postId} = value as Record<string, unknown>;
+        const u = Number(userId);
+        const p = Number(postId);
+        return Number.isInteger(u) && u >= 1 && Number.isInteger(p) && p >= 1
+          ? {value: {userId: u, postId: p}}
+          : {issues: [{message: 'expected positive integers'}]};
+      }
+    }
+  };
+
+  /** Same validator behind an async `validate`, as valibot async would be. */
+  const asyncIdSchema: StandardSchemaV1<unknown, {id: number}> = {
+    '~standard': {
+      version: 1,
+      vendor: 'test',
+      validate: (value) =>
+        Promise.resolve(idSchema['~standard'].validate(value))
+    }
+  };
+
+  it('should parse valid params with the schema, sync or async', async () => {
+    (await parseParams(idSchema, {id: '7'})).should.deepEqual({id: 7});
+    (await parseParams(asyncIdSchema, {id: '9'})).should.deepEqual({id: 9});
+  });
+
+  it('should reject with ParamsError carrying the issues', async () => {
+    let error: any;
+    try {
+      await parseParams(idSchema, {id: 'abc'});
+    } catch (e) {
+      error = e;
+    }
+    Should(error).be.an.instanceOf(ParamsError);
+    Should(error).be.an.instanceOf(NativeRouterError);
+    error.message.should.equal(
+      'Invalid path params "{"id":"abc"}": id: expected a positive integer'
+    );
+    error.params.should.deepEqual({id: 'abc'});
+    error.issues.should.deepEqual([
+      {message: 'expected a positive integer', path: ['id']}
+    ]);
+  });
+
+  it('should parse synchronously and reject async schemas', () => {
+    parseParamsSync(idSchema, {id: '7'}).should.deepEqual({id: 7});
+    let error: any;
+    try {
+      parseParamsSync(asyncIdSchema, {id: '7'});
+    } catch (e) {
+      error = e;
+    }
+    error.message.should.equal(
+      'The params schema validates asynchronously; parse it during resolve ' +
+        '(parseParams) instead of synchronously'
+    );
+  });
+
+  /** Same fixture keyed on `userId`, for parent-level prefix validation. */
+  const userIdSchema: StandardSchemaV1<unknown, {userId: number}> = {
+    '~standard': {
+      version: 1,
+      vendor: 'test',
+      validate(value) {
+        const {userId} = value as {userId?: unknown};
+        const parsed = Number(userId);
+        return Number.isInteger(parsed) && parsed >= 1
+          ? {value: {userId: parsed}}
+          : {
+              issues: [
+                {message: 'expected a positive integer', path: ['userId']}
+              ]
+            };
+      }
+    }
+  };
+
+  it('should hand beforeLoad the coerced params of the merged prefix', async () => {
+    const seen: unknown[] = [];
+    const history = createMemoryHistory({initialEntries: ['/']});
+    const routes: BaseRoute[] = [
+      {
+        path: '/users/:userId',
+        params: userIdSchema,
+        children: [
+          {
+            path: '/posts/:postId',
+            beforeLoad: ({params}) => {
+              seen.push(params);
+            }
+          }
+        ]
+      }
+    ];
+    const router = create(routes, history, (matched) =>
+      Promise.resolve(`view:${matched.at(-1)!.path}`)
+    );
+    // The parent level's schema coerces `userId` at its turn; the guard
+    // of the schema-less child sees it merged with the child's raw
+    // `postId`.
+    await navigate(router, '/users/1/posts/2');
+    seen.should.deepEqual([{userId: 1, postId: '2'}]);
+  });
+
+  it('should let a deeper schema coerce the whole merged prefix', async () => {
+    const seen: unknown[] = [];
+    const history = createMemoryHistory({initialEntries: ['/']});
+    const routes: BaseRoute[] = [
+      {
+        path: '/users/:userId',
+        params: userIdSchema,
+        children: [
+          {
+            path: '/posts/:postId',
+            params: mergedSchema,
+            beforeLoad: ({params}) => {
+              seen.push(params);
+            }
+          }
+        ]
+      }
+    ];
+    const router = create(routes, history, (matched) =>
+      Promise.resolve(`view:${matched.at(-1)!.path}`)
+    );
+    // The child's schema validates the whole merged map, so by the guard
+    // phase every param is a number — including the parent's `userId`.
+    await navigate(router, '/users/1/posts/2');
+    seen.should.deepEqual([{userId: 1, postId: 2}]);
+  });
+
+  it('should keep raw string params on schema-less routes', async () => {
+    const seen: unknown[] = [];
+    const history = createMemoryHistory({initialEntries: ['/']});
+    const router = create(
+      {
+        path: '',
+        children: [
+          {
+            path: '/users/:id',
+            beforeLoad: ({params}) => {
+              seen.push(params);
+            }
+          }
+        ]
+      },
+      history,
+      (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+    );
+    await navigate(router, '/users/7');
+    seen.should.deepEqual([{id: '7'}]);
+  });
+
+  it('should fail a guarded navigation when params are invalid', async () => {
+    const history = createMemoryHistory({initialEntries: ['/']});
+    const routes: BaseRoute[] = [
+      {
+        path: '',
+        children: [
+          {path: '/users/:id', params: idSchema, beforeLoad: () => undefined}
+        ]
+      }
+    ];
+    const router = create(
+      routes,
+      history,
+      (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`),
+      {
+        errorHandler: (e) =>
+          `fallback:${e instanceof ParamsError ? e.issues[0].message : e}`
+      }
+    );
+    // The params parse runs before the guard phase, so the failure rides
+    // the same errorHandler channel a search-schema failure would; the
+    // view falls back but the history entry still commits.
+    await navigate(router, '/users/abc');
+    getCurrentView(router).should.equal('fallback:expected a positive integer');
+    history.location.pathname.should.equal('/users/abc');
+  });
+
+  it('should validate a wildcard param through the merged string map', async () => {
+    // The matcher hands wildcards over as `string[]` (path-to-regexp 8.4.2);
+    // the schema is the place to normalize them.
+    const restSchema: StandardSchemaV1<unknown, {rest: number[]}> = {
+      '~standard': {
+        version: 1,
+        vendor: 'test',
+        validate(value) {
+          const {rest} = value as {rest?: unknown};
+          const nums = Array.isArray(rest) ? rest.map(Number) : [];
+          return Array.isArray(rest) &&
+            nums.every((n) => Number.isInteger(n) && n >= 0)
+            ? {value: {rest: nums}}
+            : {
+                issues: [{message: 'expected integer segments', path: ['rest']}]
+              };
+        }
+      }
+    };
+    const seen: unknown[] = [];
+    const history = createMemoryHistory({initialEntries: ['/']});
+    const router = create(
+      {
+        path: '',
+        children: [
+          {
+            path: '/files/*rest',
+            params: restSchema,
+            beforeLoad: ({params}) => {
+              seen.push(params);
+            }
+          }
+        ]
+      } as BaseRoute,
+      history,
+      (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+    );
+    await navigate(router, '/files/1/2/3');
+    seen.should.deepEqual([{rest: [1, 2, 3]}]);
   });
 });

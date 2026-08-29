@@ -1,4 +1,4 @@
-import {SearchError} from './errors';
+import {ParamsError, SearchError} from './errors';
 import type {SearchInput, SearchOutputOf, StandardSchemaV1} from './types';
 
 /**
@@ -87,4 +87,60 @@ export function parseSearchSync<S extends StandardSchemaV1>(
 
 function isThenable<T>(value: T | Promise<T>): value is Promise<T> {
   return typeof (value as Promise<T> | undefined)?.then === 'function';
+}
+
+/**
+ * Validate the merged path params of a route level with a
+ * {@link StandardSchemaV1} schema — any zod/valibot/arktype schema
+ * works, no hard dependency. Params arrive as the plain string map the
+ * matcher extracted(see `mergeMatchedParams`), so schemas can coerce
+ * (`'7'` → `7`) and normalize along the way.
+ *
+ * Async schemas(`validate` returning a promise) are awaited.
+ *
+ * @group Methods
+ * @category Route
+ * @param schema the params schema
+ * @param params the merged raw params of the level
+ * @returns the parsed(and possibly coerced) output of the schema
+ * @throws {ParamsError} when the schema reports issues
+ */
+export async function parseParams<S extends StandardSchemaV1>(
+  schema: S,
+  params: Record<string, string>
+): Promise<SearchOutputOf<S>> {
+  const result = await schema['~standard'].validate(params);
+  if (result.issues) throw new ParamsError(params, result.issues);
+  // The schema's declared output; the loose `StandardSchemaV1` default
+  // degrades to `unknown`.
+  return result.value as SearchOutputOf<S>;
+}
+
+/**
+ * Synchronous flavor of {@link parseParams}, for render-time reads and
+ * custom `resolveView` implementations.
+ *
+ * @group Methods
+ * @category Route
+ * @param schema the params schema — must validate synchronously
+ * @param params the merged raw params of the level
+ * @returns the parsed(and possibly coerced) output of the schema
+ * @throws {ParamsError} when the schema reports issues
+ * @throws when the schema validates asynchronously; use {@link parseParams}
+ * for async schemas instead
+ */
+export function parseParamsSync<S extends StandardSchemaV1>(
+  schema: S,
+  params: Record<string, string>
+): SearchOutputOf<S> {
+  const result = schema['~standard'].validate(params);
+  if (isThenable(result)) {
+    throw new Error(
+      'The params schema validates asynchronously; parse it during resolve ' +
+        '(parseParams) instead of synchronously'
+    );
+  }
+  if (result.issues) throw new ParamsError(params, result.issues);
+  // See parseParams for the cast rationale.
+  return result.value as SearchOutputOf<S>;
 }

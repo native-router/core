@@ -113,6 +113,37 @@ const router = create(
 - 守卫：`beforeLoad` 以 `ctx.search` 收到该层解析后的 search——schema 输出（经 `parseSearch` 解析，异步校验器可用），无 schema 的层退化为输入对象；校验不通过时与 data 阶段的 search 错误一样走 `errorHandler` 通道
 - 校验不通过抛出 `SearchError`（`NativeRouterError` 的子类），携带原始 `search` 与 schema 报告的 `issues`——像其他解析失败一样交给 `errorHandler` 处理
 
+## Params 校验
+
+params 恒为字符串（通配符为字符串数组）——URL 没有类型。在路由层声明 `params` schema，内核会在该层 `beforeLoad` 之前校验/coerce 该层及祖先合并后的 params，守卫拿到的是 number，不再到处 `Number(id)`。
+
+```ts
+import {create} from '@native-router/core';
+import {z} from 'zod';
+
+const router = create(
+  {
+    path: '',
+    children: [
+      {
+        path: '/users/:id',
+        params: z.object({id: z.coerce.number().int().positive()}),
+        beforeLoad: ({params}) => {
+          params.id; // number——已 coerce，否则导航已失败
+        }
+      }
+    ]
+  },
+  createBrowserHistory(),
+  (matched) => renderUser(matched)
+);
+```
+
+- 不声明 `params` → 行为不变：原始字符串照常下发
+- 逐层解析（浅 → 深）：每层的 schema 校验合并到该层为止的 params；更深一层的 schema 看到的是浅层（可能已 coerce）的输出
+- 校验不通过走 `errorHandler` 通道抛出 `ParamsError`（`NativeRouterError` 的子类），携带原始 `params` 与 `issues`——与 search schema 失败同一条路
+- `parseParams`/`parseParamsSync` 一并导出，供自定义 `resolveView` 使用（异步/同步版本对应 `parseSearch`/`parseSearchSync`）
+
 ## 设计原则
 
 **导航语义跟随浏览器**——native-router 对齐的是浏览器原生导航语义（browser-native navigation semantics），而非其它 SPA 路由库的行为。后续所有导航 API 设计决策都以此为唯一准绳，「某个流行 router 有」本身不构成跟进的理由。这些是有意设计，不是待修的 bug。

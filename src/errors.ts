@@ -43,6 +43,33 @@ export class SearchError extends NativeRouterError {
   }
 }
 
+/**
+ * Thrown when a route {@link BaseRoute.params params schema} rejects the
+ * merged path params. Issues are formatted like {@link SearchError}'s —
+ * `path: message` pairs joined with `; `, e.g.
+ * `Invalid path params "/users/abc": id: expected a number`.
+ */
+export class ParamsError extends NativeRouterError {
+  /** The raw params object that failed validation. */
+  readonly params: Record<string, string>;
+
+  /** The issues reported by the schema. */
+  readonly issues: ReadonlyArray<StandardSchemaV1.Issue>;
+
+  constructor(
+    params: Record<string, string>,
+    issues: ReadonlyArray<StandardSchemaV1.Issue>
+  ) {
+    super(
+      `Invalid path params "${JSON.stringify(params)}": ${issues
+        .map(({message, path}) => `${formatIssuePath(path)}${message}`)
+        .join('; ')}`
+    );
+    this.params = params;
+    this.issues = issues;
+  }
+}
+
 function formatIssuePath(path: StandardSchemaV1.Issue['path']) {
   if (!path?.length) return '';
   const keys = path.map((segment) =>

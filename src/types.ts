@@ -249,6 +249,13 @@ export type ExtractPathParams<P extends string> =
 export type GuardContext<R extends BaseRoute = BaseRoute, S = unknown> = {
   router: RouterInstance<R>;
   location: Location;
+  /**
+   * The merged params of this level and its parents: when any level
+   * declares a {@link BaseRoute.params params schema}, the merged raw
+   * params are parsed through the deepest matching schema before the
+   * guard runs; without schemas the raw string map the matcher
+   * extracted.
+   */
   params: Record<string, string>;
   /**
    * The search the guard sees: the route's {@link BaseRoute.search search
@@ -284,6 +291,18 @@ export type BaseRoute<T = any> = {
    * navigation error.
    */
   search?: StandardSchemaV1;
+  /**
+   * Optional Standard Schema validator of the merged path params this
+   * level and its parents contribute(see `mergeMatchedParams`). The core
+   * runs it in {@link resolveEntry} after matching and before the level's
+   * `beforeLoad`, so guards and loaders see coerced params(e.g. `:id`
+   * as a number) instead of raw strings; a validation failure fails the
+   * resolve like any other navigation error(via `ParamsError`).
+   *
+   * Omit it and the params stay the raw `Record<string, string>` the
+   * matcher extracted — behavior is unchanged.
+   */
+  params?: StandardSchemaV1;
   /**
    * Route guard invoked before the view resolves. Return a path string
    * to redirect, or nothing(`undefined`) to continue. The guard's

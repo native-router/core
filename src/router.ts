@@ -10,7 +10,7 @@ import type {
   ResolveView,
   HistoryState
 } from './types';
-import {parseSearch, parseSearchInput} from './search';
+import {parseParams, parseSearch, parseSearchInput} from './search';
 import {createCurrentGuard, noop, reject} from './util';
 import {NotFoundError, RedirectLoopError} from './errors';
 
@@ -362,7 +362,12 @@ export function resolveTo<R extends BaseRoute = BaseRoute, V = any>(
  * A guard's context also carries the level's parsed
  * {@link GuardContext.search search}: the {@link BaseRoute.search schema}
  * output(its validation failure rejects this resolution with a
- * `SearchError`), or the degraded input without a schema.
+ * `SearchError`), or the degraded input without a schema. Its
+ * {@link GuardContext.params params} are likewise the merged raw string
+ * map unless some level declares a {@link BaseRoute.params params
+ * schema} — the deepest schema seen so far has already upgraded them to
+ * its output(its validation failure rides the same channel with a
+ * `ParamsError`).
  *
  * @group Methods
  * @category Router
@@ -397,8 +402,32 @@ export async function resolveEntry<R extends BaseRoute = BaseRoute, V = any>(
     }
 
     let redirected = false;
+    // Raw params merged level-by-level; a level with a `params` schema
+    // upgrades them to the schema output before its guard runs, so
+    // guards of deeper levels see coerced params of the whole prefix.
+    let params: Record<string, string> = {};
     for (let i = 0; i < matched.length; i++) {
       const {route} = matched[i];
+      params = {...params, ...matched[i].params};
+      // The level's params schema runs before its guard, so the guard
+      // sees the coerced output. A validation failure fails the
+      // resolution through the task's errorHandler channel — the same
+      // route a search-schema failure takes — instead of rejecting this
+      // entry, which preload consumers share.
+      if (route.params) {
+        try {
+          // eslint-disable-next-line no-await-in-loop -- guards must run in declaration order, sequentially
+          params = (await parseParams(route.params, params)) as Record<
+            string,
+            string
+          >;
+        } catch (e) {
+          return {
+            location,
+            task: Promise.reject(e).catch(errorHandler)
+          };
+        }
+      }
       // `redirect` wins over `beforeLoad`; a non-empty string target
       // restarts the resolution at the redirected location.
       let target: string | Awaitable<string | void> | undefined =
@@ -428,7 +457,7 @@ export async function resolveEntry<R extends BaseRoute = BaseRoute, V = any>(
         target = await route.beforeLoad({
           router,
           location,
-          params: mergeMatchedParams(matched, i),
+          params,
           signal,
           search
         });
