@@ -146,6 +146,28 @@ const router = create(
 - 校验不通过走 `errorHandler` 通道抛出 `ParamsError`（`NativeRouterError` 的子类），携带原始 `params` 与 `issues`——与 search schema 失败同一条路
 - `parseParams`/`parseParamsSync` 一并导出，供自定义 `resolveView` 使用（异步/同步版本对应 `parseSearch`/`parseSearchSync`）
 
+## Router 上下文
+
+给 `create` 传 `context` 选项，每个 router 实例携带一份自己的值：守卫从 `ctx.context`（`GuardContext`）拿到它，自定义 `resolveView` 从 `ctx.context`（`ResolveViewContext`）拿到它。它是按实例注入依赖（API client、配置、i18n 句柄）的注入点——模块单例做不到的隔离：每个测试一个 router，fixture 不会串；每个微前端面板一个 router，面板之间不共享状态。
+
+```ts
+import {create, navigate} from '@native-router/core';
+
+const router = create(
+  {path: '', children: [{path: '/a', beforeLoad: ({context}) => context.api.ready()}]},
+  createBrowserHistory(),
+  (matched, {context}) => Promise.resolve(render(context.api, matched)),
+  {context: {api: myApi}} // ← 每实例一份，同步值
+);
+
+router.context; // {api: myApi} —— 类型由该选项推导
+```
+
+- 值的类型由选项推导，流入 `RouterInstance<R, V, C>` 的 `context` 成员；不传该选项则一切照旧——context 为 `undefined`，现有 router 的类型与行为零改动
+- 要给守卫精确类型，把 context 类型穿过泛型传入：`GuardContext<R, S, P, {api: Api}>`（与 `params`/`search` 泛型的手动标注同一套路——路由表声明在 router 之前，宽松默认值无从得知 router 的 context 类型）
+- 每实例一份、同步读取：不是响应式 store，变更不触发任何重新解析，也不参与 viewStack 快照 key——实例级状态天然互相隔离
+- `@native-router/react` 透传同一选项：`createRouter` 的 options、`<Router>`/`HistoryRouter`/`HashRouter`/`MemoryRouter` 的 props、以及 `data` loader 的 `ctx.context` 都携带它
+
 ## 设计原则
 
 **导航语义跟随浏览器**——native-router 对齐的是浏览器原生导航语义（browser-native navigation semantics），而非其它 SPA 路由库的行为。后续所有导航 API 设计决策都以此为唯一准绳，「某个流行 router 有」本身不构成跟进的理由。这些是有意设计，不是待修的 bug。

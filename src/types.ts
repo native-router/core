@@ -247,17 +247,20 @@ export type ExtractPathParams<P extends string> =
  *
  * Type arguments: `S` types {@link GuardContext.search search}(schema
  * output, or the degraded input without a schema), `P` types
- * {@link GuardContext.params params}. Both default to what a
- * schema-less route produces — `search: unknown`, `params: the raw
- * string map` — so plain guards keep compiling unchanged; thread a
- * params schema's coerced output through `P` to type what the guard
- * actually receives at runtime.
+ * {@link GuardContext.params params}, `C` types
+ * {@link GuardContext.context context}. All default to what a
+ * schema-less, context-less route produces — `search: unknown`,
+ * `params: the raw string map`, `context: undefined` — so plain guards
+ * keep compiling unchanged; thread a params schema's coerced output
+ * through `P`(and the router's context type through `C`) to type what
+ * the guard actually receives at runtime.
  */
 
 export type GuardContext<
   R extends BaseRoute = BaseRoute,
   S = unknown,
-  P = Record<string, string>
+  P = Record<string, string>,
+  C = undefined
 > = {
   router: RouterInstance<R>;
   location: Location;
@@ -289,6 +292,20 @@ export type GuardContext<
    * navigation stops consuming the network.
    */
   signal: AbortSignal;
+  /**
+   * The router's {@link Options.context instance context} — the value
+   * passed as `context` to {@link create}, shared by everything the
+   * router resolves(deps, config, i18n handles, ...). It is per
+   * instance, so two routers(e.g. one per test, or one per micro-frontend
+   * pane) each see their own value where a module singleton would leak
+   * across them.
+   *
+   * The loose default types it `undefined` — what a context-less
+   * `create` produces; thread the fourth type argument the value's type
+   * (`GuardContext<R, S, P, {api: Api}>`) to type what the guard actually
+   * receives at runtime.
+   */
+  context: C;
 };
 
 export type BaseRoute<T = any> = {
@@ -336,7 +353,7 @@ export type Matched<R extends BaseRoute = BaseRoute> = {route: R} & MatchResult<
   Record<string, string>
 >;
 
-export type ResolveViewContext<R extends BaseRoute> = {
+export type ResolveViewContext<R extends BaseRoute, C = undefined> = {
   router: RouterInstance<R>;
   location: Location;
   /**
@@ -345,15 +362,45 @@ export type ResolveViewContext<R extends BaseRoute> = {
    * their data contexts so loaders can abort their requests.
    */
   signal: AbortSignal;
+  /**
+   * The router's {@link Options.context instance context} — the value
+   * passed as `context` to {@link create}. Frameworks forward it into
+   * their data contexts alongside `signal`(see `@native-router/react`'s
+   * `data` loaders); the loose default `undefined` is what a context-less
+   * `create` produces — thread the router's context type through the
+   * second type argument to type it.
+   */
+  context: C;
 };
 export type ResolveView<R extends BaseRoute, V> = (
   matched: Matched<R>[],
   ctx: ResolveViewContext<R>
 ) => Promise<V>;
 
-export type Options<V> = {
+export type Options<V, C = undefined> = {
   baseUrl?: string;
   currentView?: V;
+  /**
+   * The router's instance context: a synchronous value baked in at
+   * {@link create} time, shared by everything this router resolves.
+   * Guards receive it as {@link GuardContext.context ctx.context},
+   * `resolveView` implementations as {@link ResolveViewContext.context
+   * ctx.context} — the injection point for per-instance dependencies
+   * (an API client, config, i18n handles, test fixtures) that a module
+   * singleton cannot isolate: two routers(e.g. one per test, or one per
+   * micro-frontend pane) each carry their own value.
+   *
+   * The value's type is inferred from this option and flows into the
+   * returned {@link RouterInstance RouterInstance<R, V, C>}'s `context`
+   * member; omit it and the context stays `undefined` — existing routers
+   * keep their exact types and behavior.
+   *
+   * One value per instance, read synchronously: it is not a reactive
+   * store, does not re-resolve anything on change, and takes no part in
+   * the viewStack snapshot keys(instance-level state is naturally
+   * isolated between routers).
+   */
+  context?: C;
   errorHandler?(e: Error): V | Promise<V>;
   onLoadingChange?(status?: 'pending' | 'resolved' | 'rejected'): void;
   /**
@@ -377,7 +424,11 @@ export type Options<V> = {
 export type RequiredOf<T, K extends keyof T> = Required<Pick<T, K>> &
   Omit<T, K>;
 
-export type RouterInstance<R extends BaseRoute, V = any> = {
+/**
+ * @group Types
+ * @category Router
+ */
+export type RouterInstance<R extends BaseRoute, V = any, C = any> = {
   routes: R[];
   baseUrl: string;
   history: History & {location: WrappedLocation};
@@ -393,4 +444,14 @@ export type RouterInstance<R extends BaseRoute, V = any> = {
   currentGuard<T>(promise: Promise<T>): Promise<T>;
   cancelAll(): void;
   resolving?: Location;
-} & RequiredOf<Options<V>, 'baseUrl' | 'maxStackDepth'>;
+  /**
+   * The router's {@link Options.context instance context} — the value
+   * passed as `context` to {@link create}, `undefined` for context-less
+   * routers. Guards and `resolveView` implementations receive it as
+   * their ctx's `context`; per instance, so two routers never share it.
+   * Declared here(instead of through `RequiredOf`) because `Required`
+   * strips the `undefined` unit an optional `context?: undefined` would
+   * contribute — and `undefined` minus `undefined` is `never`.
+   */
+  context: C;
+} & RequiredOf<Options<V, C>, 'baseUrl' | 'maxStackDepth'>;

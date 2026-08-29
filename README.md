@@ -146,6 +146,28 @@ const router = create(
 - A rejected validation fails the resolution through the `errorHandler` channel with a `ParamsError` (a `NativeRouterError`) carrying the raw `params` and the reported `issues` — the same route a search-schema failure takes
 - `parseParams`/`parseParamsSync` are exported for custom `resolveView` implementations (the async/sync flavors mirror `parseSearch`/`parseSearchSync`)
 
+## Router context
+
+Pass a `context` option to `create` and every router carries its own value, handed to guards as `ctx.context` (`GuardContext`) and to your `resolveView` as `ctx.context` (`ResolveViewContext`). It is the injection point for per-instance dependencies — an API client, config, i18n handles — that a module singleton cannot isolate: one router per test keeps fixtures from leaking across tests, one router per micro-frontend pane keeps panes from sharing state.
+
+```ts
+import {create, navigate} from '@native-router/core';
+
+const router = create(
+  {path: '', children: [{path: '/a', beforeLoad: ({context}) => context.api.ready()}]},
+  createBrowserHistory(),
+  (matched, {context}) => Promise.resolve(render(context.api, matched)),
+  {context: {api: myApi}} // ← one value per instance, synchronous
+);
+
+router.context; // {api: myApi} — typed from the option
+```
+
+- The value's type is inferred from the option and flows into `RouterInstance<R, V, C>`'s `context` member; omit the option and everything stays exactly as before — the context is `undefined` and existing routers keep their types and behavior
+- Thread the context type through the context generic to type a guard precisely: `GuardContext<R, S, P, {api: Api}>` (the same manual-generic pattern the `params`/`search` generics use — the route table is declared before the router, so the loose default cannot know the router's context)
+- One value per instance, read synchronously: not a reactive store, nothing re-resolves on change, and it takes no part in the viewStack snapshot keys — instance-level state is naturally isolated between routers
+- `@native-router/react` forwards the same option: `createRouter` options, `<Router>`/`HistoryRouter`/`HashRouter`/`MemoryRouter` props, and the `data` loader's `ctx.context` all carry it
+
 ## Design principles
 
 **Navigation semantics follow the browser** — native-router aligns with browser-native navigation semantics, not with what other SPA routers happen to do. Every navigation API decision is measured against that yardstick; "a popular router has it" is not, by itself, a reason to follow. These are deliberate choices, not bugs to fix.

@@ -117,6 +117,86 @@ describe('Router', () => {
     });
   });
 
+  describe('context', () => {
+    it('should hand the instance context to guards and resolveView', async () => {
+      const api = {user: 'u1'};
+      const seen: {guard?: unknown; view?: unknown} = {};
+      const history = createMemoryHistory({initialEntries: ['/']});
+      const router = create(
+        {
+          path: '',
+          children: [
+            {
+              path: '/a',
+              beforeLoad: ({context}) => {
+                seen.guard = context;
+              }
+            }
+          ]
+        },
+        history,
+        (matched, {context}) => {
+          seen.view = context;
+          return Promise.resolve(matched.at(-1)!.path);
+        },
+        {context: api}
+      );
+
+      (router.context === api).should.be.true();
+      await navigate(router, '/a');
+      seen.guard!.should.be.exactly(api);
+      seen.view!.should.be.exactly(api);
+    });
+
+    it('should keep the context undefined on both ctxs without the option', async () => {
+      const seen: {guard?: unknown; view?: unknown} = {};
+      const history = createMemoryHistory({initialEntries: ['/']});
+      const router = create(
+        {
+          path: '',
+          children: [
+            {
+              path: '/a',
+              beforeLoad: ({context}) => {
+                seen.guard = context;
+              }
+            }
+          ]
+        },
+        history,
+        (matched, {context}) => {
+          seen.view = context;
+          return Promise.resolve(matched.at(-1)!.path);
+        }
+      );
+
+      (router.context === undefined).should.be.true();
+      await navigate(router, '/a');
+      (seen.guard === undefined).should.be.true();
+      (seen.view === undefined).should.be.true();
+    });
+
+    it('should isolate the context between two router instances', async () => {
+      const seen: string[] = [];
+      const make = (tag: string) =>
+        create(
+          {path: '', children: [{path: '/a'}]},
+          createMemoryHistory({initialEntries: ['/']}),
+          (matched, {context}) => {
+            seen.push(`${tag}:${(context as unknown as {tag: string}).tag}`);
+            return Promise.resolve(null);
+          },
+          {context: {tag}}
+        );
+
+      const a = make('a');
+      const b = make('b');
+      await navigate(a, '/a');
+      await navigate(b, '/a');
+      seen.should.deepEqual(['a:a', 'b:b']);
+    });
+  });
+
   describe('navigate', () => {
     it('should navigate to a new path', () => {
       const history = createMemoryHistory();

@@ -73,15 +73,17 @@ type RouterCore<R extends BaseRoute, V = any> = RouterInstance<R, V> & {
  * @param routes routes config
  * @param history {@link https://www.npmjs.com/package/history history} instance
  * @param resolveView a callback to resolve view. see {@link defaultResolveView}
- * @param options options
+ * @param options options; `context` bakes in a per-instance value that
+ * guards and `resolveView` receive as their {@link GuardContext.context
+ * ctx.context}
  * @returns a router instance
  */
-export function create<R extends BaseRoute = BaseRoute, V = any>(
+export function create<R extends BaseRoute = BaseRoute, V = any, C = undefined>(
   routes: R | R[],
   history: History,
   resolveView: ResolveView<R, V>,
-  options?: Options<V>
-): RouterInstance<R, V> {
+  options?: Options<V, C>
+): RouterInstance<R, V, C> {
   type InstanceHistory = RouterInstance<any>['history'];
 
   const [currentGuard, cancelAll] = createCurrentGuard();
@@ -120,7 +122,10 @@ export function create<R extends BaseRoute = BaseRoute, V = any>(
     errorHandler: reject,
     ...options,
     baseUrl: options?.baseUrl || '',
-    maxStackDepth: options?.maxStackDepth || DEFAULT_MAX_STACK_DEPTH
+    maxStackDepth: options?.maxStackDepth || DEFAULT_MAX_STACK_DEPTH,
+    // Instance context: explicit (not just the spread above) so the
+    // member always exists — `undefined` for context-less routers.
+    context: options?.context
   };
 
   if (options?.currentView) {
@@ -136,9 +141,13 @@ export function create<R extends BaseRoute = BaseRoute, V = any>(
   return router;
 }
 
-export function setOptions<R extends BaseRoute = BaseRoute, V = any>(
-  router: RouterInstance<R, V>,
-  options: Omit<Options<V>, 'currentView'>
+export function setOptions<
+  R extends BaseRoute = BaseRoute,
+  V = any,
+  C = undefined
+>(
+  router: RouterInstance<R, V, C>,
+  options: Omit<Options<V, C>, 'currentView'>
 ) {
   return Object.assign(router, options);
 }
@@ -314,7 +323,8 @@ export function resolve<R extends BaseRoute = BaseRoute, V = any>(
           location,
           // One-shot resolves(warm-up, direct calls) are never superseded
           // or cancelled: their loaders get a signal that never aborts.
-          signal: new AbortController().signal
+          signal: new AbortController().signal,
+          context: router.context
         })
       : Promise.reject(new NotFoundError(location.pathname))
   ).catch(errorHandler);
@@ -464,7 +474,8 @@ export async function resolveEntry<R extends BaseRoute = BaseRoute, V = any>(
           location,
           params,
           signal,
-          search
+          search,
+          context: router.context
         });
       }
       if (target) {
@@ -478,7 +489,12 @@ export async function resolveEntry<R extends BaseRoute = BaseRoute, V = any>(
 
     return {
       location,
-      task: resolveView(matched, {router, location, signal}).catch(errorHandler)
+      task: resolveView(matched, {
+        router,
+        location,
+        signal,
+        context: router.context
+      }).catch(errorHandler)
     };
   }
 }

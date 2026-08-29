@@ -59,3 +59,50 @@ describe('GuardContext', () => {
     expectTypeOf(guard).toBeFunction();
   });
 });
+
+describe('instance context', () => {
+  it('should default the ctx context to undefined', () => {
+    expectTypeOf<GuardContext['context']>().toEqualTypeOf<undefined>();
+    expectTypeOf<
+      GuardContext<BaseRoute, {q: string}>['context']
+    >().toEqualTypeOf<undefined>();
+  });
+
+  it('should type the ctx context through the fourth argument', () => {
+    expectTypeOf<
+      GuardContext<
+        BaseRoute,
+        unknown,
+        Record<string, string>,
+        {api: string}
+      >['context']
+    >().toEqualTypeOf<{api: string}>();
+  });
+
+  it('should infer the instance context type from the create option', async () => {
+    const {create} = await import('../src/router');
+    const history = {location: {pathname: '/'}} as never;
+
+    const contextual = create(
+      {path: '/'},
+      history,
+      () => Promise.resolve(null),
+      {context: {api: 'x'}}
+    );
+    expectTypeOf(contextual.context).toEqualTypeOf<{api: string}>();
+
+    // No context option: the member stays exactly `undefined` — the
+    // pre-existing types are unchanged for old call sites.
+    const plain = create({path: '/'}, history, () => Promise.resolve(null));
+    expectTypeOf(plain.context).toEqualTypeOf<undefined>();
+    const baseUrlOnly = create(
+      {path: '/'},
+      history,
+      () => Promise.resolve(null),
+      {
+        baseUrl: '/app'
+      }
+    );
+    expectTypeOf(baseUrlOnly.context).toEqualTypeOf<undefined>();
+  });
+});
