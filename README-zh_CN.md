@@ -75,6 +75,7 @@ commit(router, entry.task, entry.location); // 像点击一样提交
 - 导航 API：`navigate`、`refresh`、`go`/`forward`/`back`、`commit`/`commitReplace`、`createHref`、`getParams`、`match`、`toLocation`、`resolve`、`resolveTo`
 - `invalidate(router)`：一次性丢弃会话视图快照——当前视图保持渲染（不重解析、不重渲染），下一次前进/后退经守卫重新解析；典型调用点是登出/切换账号之后，防止 POP 回退渲染上一账号数据或绕过会话内已执行过的守卫
 - 基于 [Standard Schema](https://standardschema.dev) 的 search 校验：任意路由层可声明 `search` 校验器（zod/valibot/arktype，无硬依赖），用 `parseSearch`/`parseSearchSync` 解析；失败抛出 `SearchError`
+- 基于 `searchDeps` 的 search 精细失效：在每层声明本层解析消费的 search 键（`[]` = 完全不消费，函数形式自行推导投影），同路径导航若每层投影不变，直接复用当前视图快照——零守卫、零 loader、零懒加载，与 POP 命中 `viewStack` 完全一致；未声明的层保持「每次导航重解析」的现状（逐字节一致）；`reusableEntry` 导出该判定，供框架 setter 以同一语义提交 search 写入
 - `preload(router, to, {ttl})`：提前经守卫解析目标，并发调用共享同一任务（in-flight 去重）并带 TTL（默认 30 秒）；commit 消费后即失效
 - `errorHandler` 钩子把解析失败转换为兜底视图
 - 错误类型：`NativeRouterError`、`NotFoundError`、`RedirectLoopError`、`SearchError`
@@ -113,6 +114,64 @@ const router = create(
 - `parseSearch(schema, search)` 解析出 schema 输出（异步校验器会被 await）；`parseSearchSync` 是渲染时机的同步版本，遇到异步校验器会抛出明确的错误
 - 守卫：`beforeLoad` 以 `ctx.search` 收到该层解析后的 search——schema 输出（经 `parseSearch` 解析，异步校验器可用），无 schema 的层退化为输入对象；校验不通过时与 data 阶段的 search 错误一样走 `errorHandler` 通道
 - 校验不通过抛出 `SearchError`（`NativeRouterError` 的子类），携带原始 `search` 与 schema 报告的 `issues`——像其他解析失败一样交给 `errorHandler` 处理
+
+## Search 精细失效
+
+同路径名导航默认重跑整条链——每层的 `beforeLoad`、`data`/`resolveView` 与懒加载 `component`——哪怕 search 的变化再小。可选字段 `searchDeps`（`searchDeps?: string[] | ((search: SearchInput) => unknown)`）声明本层解析实际消费的键；匹配链每层都声明且投影不变时，直接复用当前视图快照：
+
+```ts
+import {create} from '@native-router/core';
+import {createBrowserHistory} from 'history';
+
+const router = create(
+  {
+    path: '',
+    searchDeps: [], // 布局层：完全不消费 search
+    children: [
+      {
+        path: '/articles',
+        // 数组形式：消费的键，从 parseSearchInput 的降级输入
+        // （字符串；重复键为数组）里按键取值
+        searchDeps: ['tag', 'offset', 'limit'],
+        // 函数形式：接收降级输入对象，返回值经 JSON.stringify 比较——
+        // 返回原始值或形状稳定的值即可
+        // searchDeps: (search) => [search.tag, search.offset]
+      }
+    ]
+  },
+  createBrowserHistory(),
+  resolveView
+);
+```
+
+- **快路径**：`navigate()` 目标为同 pathname、匹配链上**每层都声明了 `searchDeps`** 且每层投影在当前条目与目标之间不变 → 当前视图快照直接作为新条目提交——零守卫、零 loader、零懒加载，与 POP 命中 `viewStack` 完全一致。基于 `reusableEntry` 构建的框架 setter（react 的 `useSearchParams`/`useSetSearch`）走同一条路径
+- **未声明（`undefined`）即现状，逐字节一致**：任何导航照旧整链重解析，与本特性之前的行为相同；链上任一层未声明 → 整链不走快路径
+- **契约是双向的——本层解析从 search 读到的一切都必须声明**：`search` schema 严格校验的键也应列进 `searchDeps`（快路径不跑 schema，未声明键的非法值会免校验落进 URL——react 的 `useSetSearch` 等写侧无论声明了什么都仍会在导航前整体校验）；`beforeLoad` 守卫读取的 search 键同理必须声明，否则这些键变化时守卫不会重跑
+- **`hash` 与 `state` 永不参与比较**——它们不是 resolve 输入，全声明链上纯 hash 导航同样复用快照
+- **复用的视图是快照**：保留其 resolve 期上下文——`data` 与 matched `ctx` 是产生该视图那次 resolve 的快照；活 search 要用框架的 search hooks 读取（react 的 `useSearch`/`useSearchParams` 订阅 history，恒最新）
+- POP 回放、`initHistoryStack` 预热、`refresh()` 与 `invalidate()` 不受影响：`invalidate()` 清掉快照后，快路径失效直到下一次真实 resolve
+
+### `reusableEntry`
+
+`navigate` 内部运行的判定，导出给以同一语义提交 search 更新的框架导航 setter（react 的 `useSetSearch`/`useSearchParams` 的 `{replace: true}` 分支直接使用）：
+
+```ts
+export function reusableEntry<R extends BaseRoute = BaseRoute, V = any>(
+  router: RouterInstance<R, V>,
+  location: Location
+): ResolvedEntry<V> | undefined;
+```
+
+同 pathname、当前条目有视图快照、匹配链全声明且投影不变 → 返回 `{location, task: Promise.resolve(当前视图)}`；否则返回 `undefined`——pathname 不同、未匹配、无快照、任一层未声明或投影变化。「否」是默认答案：拿到 `undefined` 就走真实解析。
+
+```ts
+import {commit, reusableEntry, toLocation} from '@native-router/core';
+
+const entry = reusableEntry(router, toLocation(router, '/articles?tag=react&offset=20'));
+// entry.location —— 目标 location
+// entry.task    —— resolve 当前视图，没有任何解析在进行
+if (entry) commit(router, entry.task, entry.location); // 像普通解析条目一样提交
+```
 
 ## Params 校验
 

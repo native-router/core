@@ -9,7 +9,8 @@ import type {
   BaseRoute,
   RouterInstance,
   ResolveView,
-  HistoryState
+  HistoryState,
+  SearchInput
 } from './types';
 import {parseParams, parseSearch, parseSearchInput} from './search';
 import {createCurrentGuard, noop, reject} from './util';
@@ -228,6 +229,82 @@ export function getCurrentView<R extends BaseRoute = BaseRoute>(
   router: RouterInstance<R>
 ) {
   return viewAt(router, getHistoryState(router).index);
+}
+
+/**
+ * Serialize a level's declared search projection: the picked keys of the
+ * array form(in declaration order), or the derived value of the function
+ * form. `JSON.stringify` both — the same transform on both sides makes
+ * the comparison stable, and `undefined` round-trips as itself.
+ */
+function searchDepsKey(
+  deps: NonNullable<BaseRoute['searchDeps']>,
+  input: SearchInput
+): string | undefined {
+  return JSON.stringify(
+    typeof deps === 'function' ? deps(input) : deps.map((key) => input[key])
+  );
+}
+
+/**
+ * The entry a same-route search navigation can re-serve instead of
+ * re-resolving: the current view snapshot, wrapped as the target's
+ * {@link ResolvedEntry}. `undefined` when the target must resolve for
+ * real — the whole point is that "no" is the default:
+ *
+ * - the pathname differs from the current entry's(a route change always
+ *   re-resolves), or the target matches no route at all;
+ * - the current entry has no view snapshot(a fresh router, an
+ *   `invalidate()`d window, an out-of-window slot);
+ * - any level of the matched chain leaves {@link BaseRoute.searchDeps
+ *   searchDeps} undeclared — an undeclared level depends on the whole
+ *   location, so every navigation re-resolves it, exactly as before
+ *   this API existed;
+ * - a declared level's projection differs between the current and the
+ *   target search — the level consumed something, so the chain re-runs.
+ *
+ * What is deliberately NOT compared: `hash` and `state` are not resolve
+ * inputs, so on a fully declared chain a hash-only navigation is served
+ * from the snapshot too. The re-served view keeps its resolve-time
+ * context(data, matched `ctx`) — it is the same snapshot object a POP
+ * would replay; live search belongs to the framework's search hooks.
+ *
+ * Used by {@link navigate}; exported for framework navigation setters
+ * that commit a replace-style search update through the same semantics
+ * (see `@native-router/react`'s `useSetSearch`/`useSearchParams`).
+ *
+ * @group Methods
+ * @category Router
+ * @param router router instance
+ * @param location the navigation target
+ * @returns the reusable entry, or `undefined` when the target must
+ * resolve through the guard/view chain
+ */
+export function reusableEntry<R extends BaseRoute = BaseRoute, V = any>(
+  router: RouterInstance<R, V>,
+  location: Location
+): ResolvedEntry<V> | undefined {
+  const current = router.history.location;
+  if (current.pathname !== location.pathname) return undefined;
+  const view = getCurrentView(router as RouterInstance<R>) as
+    V | null | undefined;
+  if (view == null) return undefined;
+  const matched = match<R>(router, location.pathname);
+  if (!matched) return undefined;
+  const prevSearch = parseSearchInput(current.search);
+  const nextSearch = parseSearchInput(location.search);
+  // An undeclared level opts the whole chain out of the fast path: its
+  // resolution may read anything from the location, so "re-resolve on
+  // every navigation" — the pre-searchDeps behavior — stays.
+  const unchanged = matched.every(({route}) => {
+    const {searchDeps} = route;
+    return (
+      searchDeps !== undefined &&
+      searchDepsKey(searchDeps, prevSearch) ===
+        searchDepsKey(searchDeps, nextSearch)
+    );
+  });
+  return unchanged ? {location, task: Promise.resolve(view)} : undefined;
 }
 
 /**
@@ -818,6 +895,14 @@ function commitBase<R extends BaseRoute = BaseRoute, V = any>(
  * chain's `signal`, so guards and loaders observing it({@link
  * GuardContext.signal}, {@link ResolveViewContext.signal}) stop their
  * requests instead of only having their results dropped.
+ *
+ * Same-route search navigations take the {@link BaseRoute.searchDeps
+ * searchDeps} fast path: when every level of the matched chain declares
+ * its consumed search keys and the declared projection is unchanged, the
+ * current view snapshot is re-served as the new entry({@link
+ * reusableEntry}) — no guards, no loaders, no lazy imports, exactly like
+ * a POP hitting the `viewStack`. Undeclared chains resolve on every
+ * navigation as always.
  * @group Methods
  * @category Router
  * @param router router instance
@@ -838,6 +923,19 @@ export function navigate<R extends BaseRoute = BaseRoute, V = any>(
   // The target is asked in its committed path form(`createPath`), the
   // same string a POP blocker sees, baseUrl included.
   if (blockedBy(router, createPath(location))) return Promise.resolve();
+  // The searchDeps fast path: a same-route navigation with an unchanged
+  // declared projection commits the current view snapshot directly. No
+  // controller — there is nothing in flight to abort — but the entry
+  // still rides the guarded commit pipeline(supersede/cancel/blockers on
+  // the push itself, onLoadingChange, stack bookkeeping).
+  const reusable = reusableEntry<R, V>(router, location);
+  if (reusable) {
+    return pushEntry(
+      router as RouterCore<R, V>,
+      Promise.resolve(reusable),
+      location
+    );
+  }
   // One controller per navigation round: guards and view loaders of the
   // whole chain(including redirect hops) share its signal.
   const ac = new AbortController();

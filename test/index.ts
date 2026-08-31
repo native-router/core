@@ -23,6 +23,7 @@ import {
   getCurrentView,
   getParams,
   preload,
+  reusableEntry,
   mergeMatchedParams
 } from '../src/router';
 import type {
@@ -30,6 +31,7 @@ import type {
   ExtractPathParams,
   HistoryState,
   NavAction,
+  RouterInstance,
   StandardSchemaV1
 } from '../src/types';
 import {
@@ -2739,6 +2741,390 @@ describe('search', () => {
     // same errorHandler channel a data-phase search error would.
     await navigate(router, '/list?page=abc');
     getCurrentView(router).should.equal('fallback:expected a positive integer');
+  });
+});
+
+describe('searchDeps', () => {
+  /**
+   * A router whose resolveView counts invocations and stamps views with
+   * the search they were resolved for — the probe every "zero re-run"
+   * assertion below reads.
+   */
+  function setup(routes: BaseRoute[], initial = '/list?tag=a&q=1') {
+    const history = createMemoryHistory({initialEntries: [initial]});
+    let count = 0;
+    const resolveView = sinon.fake((matched: any[], {location}: any) =>
+      Promise.resolve(
+        `view:${matched.at(-1)!.path}:${location.search}:${++count}`
+      )
+    );
+    const router = create(routes, history, resolveView);
+    return {router, history, resolveView};
+  }
+
+  /** Warm the current entry through listen's bootstrap refresh. */
+  async function warm<R extends BaseRoute, V = any>(
+    router: RouterInstance<R, V>
+  ) {
+    const views: [any, NavAction][] = [];
+    listen(router, (v, action) => views.push([v, action]));
+    await new Promise((done) => {
+      setTimeout(done);
+    });
+    return views;
+  }
+
+  it('should keep undeclared routes byte-for-byte on today’s behavior: every navigation re-resolves', async () => {
+    const {router, resolveView} = setup([
+      {path: '', children: [{path: '/list'}]}
+    ]);
+    await warm(router);
+    resolveView.callCount.should.equal(1);
+
+    // Any search change re-resolves…
+    await navigate(router, '/list?tag=a&q=2');
+    resolveView.callCount.should.equal(2);
+    // …and so does an identical location, and a hash-only hop.
+    await navigate(router, '/list?tag=a&q=2');
+    resolveView.callCount.should.equal(3);
+    await navigate(router, '/list?tag=a&q=2#anchor');
+    resolveView.callCount.should.equal(4);
+  });
+
+  it('should re-serve the snapshot when declared keys are unchanged', async () => {
+    const {router, history, resolveView} = setup([
+      {
+        path: '',
+        searchDeps: [],
+        children: [{path: '/list', searchDeps: ['tag']}]
+      }
+    ]);
+    const views = await warm(router);
+    resolveView.callCount.should.equal(1);
+
+    await navigate(router, '/list?tag=a&q=2');
+    // Zero re-resolves: the current snapshot was re-served…
+    resolveView.callCount.should.equal(1);
+    // …the history still moved(push semantics preserved)…
+    history.location.search.should.equal('?tag=a&q=2');
+    (history.location.state as HistoryState).index.should.equal(1);
+    // …both stack slots hold the very same view object…
+    router.viewStack[0].should.equal(router.viewStack[1]);
+    // …and listen announced the reused view with the push action.
+    views.at(-1)![0].should.equal('view:/list:?tag=a&q=1:1');
+    views.at(-1)![1].should.equal('push');
+  });
+
+  it('should re-resolve when a declared key changes', async () => {
+    const {router, resolveView} = setup([
+      {
+        path: '',
+        searchDeps: [],
+        children: [{path: '/list', searchDeps: ['tag']}]
+      }
+    ]);
+    await warm(router);
+    await navigate(router, '/list?tag=b&q=1');
+    resolveView.callCount.should.equal(2);
+    getCurrentView(router).should.equal('view:/list:?tag=b&q=1:2');
+  });
+
+  it('should treat an empty deps array as total search-irrelevance', async () => {
+    const {router, resolveView} = setup([
+      {path: '', searchDeps: [], children: [{path: '/list', searchDeps: []}]}
+    ]);
+    await warm(router);
+    await navigate(router, '/list?anything=else&tag=z');
+    await navigate(router, '/list');
+    resolveView.callCount.should.equal(1);
+  });
+
+  it('should support the function form, compared via JSON serialization', async () => {
+    const {router, resolveView} = setup(
+      [
+        {
+          path: '',
+          searchDeps: [],
+          children: [
+            {
+              path: '/list',
+              // Derived projection: only the tag/offset pair matters.
+              searchDeps: (search) => [search.tag, Number(search.offset ?? 0)]
+            }
+          ]
+        }
+      ],
+      '/list?tag=a&offset=1&q=1'
+    );
+    await warm(router);
+    // Irrelevant keys reuse…
+    await navigate(router, '/list?tag=a&offset=1&q=2');
+    resolveView.callCount.should.equal(1);
+    // Coercible-equal values produce the same projection: '01' → 1.
+    await navigate(router, '/list?tag=a&offset=01&q=3');
+    resolveView.callCount.should.equal(1);
+    // A changed projection member re-resolves.
+    await navigate(router, '/list?tag=a&offset=2&q=3');
+    resolveView.callCount.should.equal(2);
+    await navigate(router, '/list?tag=b&offset=2&q=3');
+    resolveView.callCount.should.equal(3);
+  });
+
+  it('should require every level of the chain to declare', async () => {
+    const undeclaredChild = setup([
+      {path: '', searchDeps: [], children: [{path: '/list'}]}
+    ]);
+    await warm(undeclaredChild.router);
+    await navigate(undeclaredChild.router, '/list?tag=a&q=2');
+    undeclaredChild.resolveView.callCount.should.equal(2);
+
+    const undeclaredParent = setup([
+      {path: '', children: [{path: '/list', searchDeps: []}]}
+    ]);
+    await warm(undeclaredParent.router);
+    await navigate(undeclaredParent.router, '/list?tag=a&q=2');
+    undeclaredParent.resolveView.callCount.should.equal(2);
+
+    const fullyDeclared = setup([
+      {
+        path: '',
+        searchDeps: [],
+        children: [{path: '/list', searchDeps: ['tag']}]
+      }
+    ]);
+    await warm(fullyDeclared.router);
+    await navigate(fullyDeclared.router, '/list?tag=a&q=2');
+    fullyDeclared.resolveView.callCount.should.equal(1);
+  });
+
+  it('should re-resolve the chain when a parent’s declared key changes, child’s unchanged', async () => {
+    const {router, resolveView} = setup([
+      {
+        path: '',
+        searchDeps: ['layout'],
+        children: [{path: '/list', searchDeps: ['tag']}]
+      }
+    ]);
+    await warm(router);
+    await navigate(router, '/list?tag=a&layout=x');
+    resolveView.callCount.should.equal(2);
+  });
+
+  it('should reuse on hash-only navigations of fully declared chains', async () => {
+    const {router, history, resolveView} = setup([
+      {path: '', searchDeps: [], children: [{path: '/list', searchDeps: []}]}
+    ]);
+    await warm(router);
+    await navigate(router, '/list?tag=a&q=1#section');
+    resolveView.callCount.should.equal(1);
+    history.location.hash.should.equal('#section');
+  });
+
+  it('should re-resolve a different pathname even when deps look equal', async () => {
+    const {router, resolveView} = setup(
+      [
+        {
+          path: '',
+          searchDeps: [],
+          children: [
+            {path: '/list', searchDeps: []},
+            {path: '/other', searchDeps: []}
+          ]
+        }
+      ],
+      '/list?tag=a'
+    );
+    await warm(router);
+    await navigate(router, '/other?tag=a');
+    resolveView.callCount.should.equal(2);
+    getCurrentView(router).should.equal('view:/other:?tag=a:2');
+  });
+
+  it('should replay snapshots on POP after reuse navigations, zero re-resolves', async () => {
+    const {router, history, resolveView} = setup([
+      {
+        path: '',
+        searchDeps: [],
+        children: [{path: '/list', searchDeps: ['tag']}]
+      }
+    ]);
+    const views = await warm(router);
+    await navigate(router, '/list?tag=a&q=2');
+    await navigate(router, '/list?tag=b&q=2');
+
+    const baseline = resolveView.callCount;
+    // Back two: first the reused slot, then the warm-up slot.
+    go(router, -2);
+    history.location.search.should.equal('?tag=a&q=1');
+    views.at(-1)![0].should.equal('view:/list:?tag=a&q=1:1');
+    go(router, 1);
+    history.location.search.should.equal('?tag=a&q=2');
+    // The reused slot replays the SAME snapshot object.
+    views.at(-1)![0].should.equal('view:/list:?tag=a&q=1:1');
+    go(router, 1);
+    views.at(-1)![0].should.equal('view:/list:?tag=b&q=2:2');
+    resolveView.callCount.should.equal(baseline);
+  });
+
+  it('should disable the fast path after invalidate() until the next resolve', async () => {
+    const guards: string[] = [];
+    const history = createMemoryHistory({initialEntries: ['/list?tag=a']});
+    let count = 0;
+    const router = create(
+      {
+        path: '',
+        searchDeps: [],
+        children: [
+          {
+            path: '/list',
+            searchDeps: ['tag'],
+            beforeLoad: () => {
+              guards.push('ran');
+            }
+          }
+        ]
+      },
+      history,
+      () => Promise.resolve(`view:${++count}`)
+    );
+    await warm(router);
+    guards.should.deepEqual(['ran']);
+
+    invalidate(router);
+    // No snapshot left: the deps-equal navigation re-resolves…guards included.
+    await navigate(router, '/list?tag=a&q=2');
+    guards.should.deepEqual(['ran', 'ran']);
+    count.should.equal(2);
+    // …and once a snapshot exists again, the fast path is back.
+    await navigate(router, '/list?tag=a&q=3');
+    count.should.equal(2);
+  });
+
+  it('should skip guards on the fast path but hand them the fresh search when they run', async () => {
+    const seen: unknown[] = [];
+    const history = createMemoryHistory({initialEntries: ['/list?tag=a']});
+    const router = create(
+      {
+        path: '',
+        searchDeps: [],
+        children: [
+          {
+            path: '/list',
+            searchDeps: ['tag'],
+            beforeLoad: ({search}) => {
+              seen.push(search);
+            }
+          }
+        ]
+      },
+      history,
+      (matched: any[]) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+    );
+    await warm(router);
+    // Fast path: the guard does not re-run for an irrelevant key…
+    await navigate(router, '/list?tag=a&q=2');
+    seen.should.have.length(1);
+    // …but a declared-key change re-runs it against the NEW search.
+    await navigate(router, '/list?tag=z&q=2');
+    seen.should.deepEqual([{tag: 'a'}, {tag: 'z', q: '2'}]);
+  });
+
+  it('should keep guard redirect chains working from a declared route', async () => {
+    const {router, history, resolveView} = setup(
+      [
+        {
+          path: '',
+          children: [
+            {path: '/list', searchDeps: []},
+            {path: '/guarded', beforeLoad: () => '/login'},
+            {path: '/login'}
+          ]
+        }
+      ],
+      '/list'
+    );
+    await warm(router);
+    await navigate(router, '/guarded?x=1');
+    // The redirect resolved the terminal target, not a reuse.
+    history.location.pathname.should.equal('/login');
+    resolveView.callCount.should.equal(2);
+  });
+
+  it('should abort a superseded in-flight chain when the fast path commits', async () => {
+    const park = new Promise<undefined>(() => {});
+    const history = createMemoryHistory({initialEntries: ['/list?tag=a']});
+    const signals: AbortSignal[] = [];
+    const router = create(
+      {
+        path: '',
+        searchDeps: [],
+        children: [{path: '/list', searchDeps: ['tag']}, {path: '/slow'}]
+      },
+      history,
+      (matched: any[], {signal}: any) => {
+        signals.push(signal);
+        if (matched.at(-1)!.path === '/slow') return park;
+        return Promise.resolve(`view:${matched.at(-1)!.path}`);
+      }
+    );
+    await warm(router);
+    // A slow chain to another route…
+    navigate(router, '/slow').catch(() => undefined);
+    // …superseded by a fast-path navigation on the current route.
+    await navigate(router, '/list?tag=a&q=2');
+    signals[1]!.aborted.should.be.true();
+    history.location.search.should.equal('?tag=a&q=2');
+    (router.resolving === undefined).should.be.true();
+  });
+
+  it('should consult blockers before the fast path', async () => {
+    const {router, history, resolveView} = setup([
+      {path: '', searchDeps: [], children: [{path: '/list', searchDeps: []}]}
+    ]);
+    await warm(router);
+    const unblock = setBlocker(router, () => false);
+    await navigate(router, '/list?tag=a&q=2');
+    // Vetoed: no history change, no reuse commit.
+    history.location.search.should.equal('?tag=a&q=1');
+    resolveView.callCount.should.equal(1);
+    unblock();
+    await navigate(router, '/list?tag=a&q=2');
+    resolveView.callCount.should.equal(1);
+    history.location.search.should.equal('?tag=a&q=2');
+  });
+
+  it('should answer reusableEntry directly', async () => {
+    const {router} = setup([
+      {
+        path: '',
+        searchDeps: [],
+        children: [{path: '/list', searchDeps: ['tag']}, {path: '/other'}]
+      }
+    ]);
+    await warm(router);
+    // Same route, unchanged declared key: the current view is reusable.
+    const entry = reusableEntry(router, toLocation(router, '/list?tag=a&q=9'));
+    (await entry!.task).should.equal('view:/list:?tag=a&q=1:1');
+    // A declared key change, a different pathname and unknown paths: no.
+    (
+      reusableEntry(router, toLocation(router, '/list?tag=b')) === undefined
+    ).should.be.true();
+    (
+      reusableEntry(router, toLocation(router, '/other?tag=a')) === undefined
+    ).should.be.true();
+    (
+      reusableEntry(router, toLocation(router, '/missing?tag=a')) === undefined
+    ).should.be.true();
+    // Fresh router without a snapshot: no.
+    const bareHistory = createMemoryHistory({initialEntries: ['/list?tag=a']});
+    const bare = create(
+      {path: '', searchDeps: [], children: [{path: '/list', searchDeps: []}]},
+      bareHistory,
+      (matched: any[]) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+    );
+    (
+      reusableEntry(bare, toLocation(bare, '/list?tag=a&q=2')) === undefined
+    ).should.be.true();
   });
 });
 

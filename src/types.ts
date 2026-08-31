@@ -341,6 +341,55 @@ export type BaseRoute<T = any> = {
    */
   search?: StandardSchemaV1;
   /**
+   * The search keys this level's resolution consumes — the opt-in that
+   * keeps irrelevant search changes from re-resolving a route.
+   *
+   * A navigation to the same pathname normally re-runs the whole chain
+   * (every level's `beforeLoad`, `data`/`resolveView` and lazy
+   * `component` imports) however small the search change is. Declaring
+   * `searchDeps` narrows that: when every level of the matched chain
+   * declares `searchDeps` and the declared projection of the search is
+   * unchanged between the current entry and the target, `navigate`(and
+   * framework setters built on {@link reusableEntry}) re-serve the
+   * current view snapshot as the new entry — zero guards, zero loaders,
+   * zero imports — exactly like a POP hitting the `viewStack`.
+   *
+   * Two forms:
+   * - `string[]`: the consumed keys, picked from the degraded
+   *   {@link SearchInput}(strings; repeated keys as arrays). `[]` means
+   *   "this level ignores the search entirely" — any search change is
+   *   irrelevant to it.
+   * - `(search) => unknown`: derives the projection yourself; the
+   *   returned value is compared after `JSON.stringify`, so return
+   *   primitives or stable-shaped values(arrays of the declared keys are
+   *   the norm, object literals work while key order stays fixed).
+   *
+   * The contract cuts both ways — everything the level's resolution
+   * reads from the search must be covered:
+   * - One undeclared level in the chain re-resolves the whole chain on
+   *   every navigation, exactly as before(undeclared is today's
+   *   behavior, byte for byte).
+   * - Keys the {@link BaseRoute.search search schema} validates strictly
+   *   belong in `searchDeps` too: a skipped navigation runs no schema,
+   *   so an invalid value of an undeclared key lands in the URL
+   *   unchecked(setters like `useSetSearch` validate the whole value
+   *   before navigating regardless).
+   * - A skipped navigation runs no `beforeLoad`: a guard that reads
+   *   search keys must see them listed, or it will not re-run when they
+   *   change.
+   *
+   * What is never compared: `hash` and `state`(they are not resolve
+   * inputs — on a fully declared chain a hash-only navigation is served
+   * from the snapshot too), and the retained view keeps its
+   * resolve-time context — framework data/`ctx` reflect the entry the
+   * view was resolved for, so read live search through the framework's
+   * search hooks rather than the matched context. POP replay,
+   * {@link initHistoryStack} warm-up, `refresh` and `invalidate` are
+   * untouched: a dropped snapshot(`invalidate`) disables the fast path
+   * until the next real resolve.
+   */
+  searchDeps?: string[] | ((search: SearchInput) => unknown);
+  /**
    * Optional Standard Schema validator of the merged path params this
    * level and its parents contribute(see `mergeMatchedParams`). The core
    * runs it in {@link resolveEntry} after matching and before the level's

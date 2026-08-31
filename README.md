@@ -75,6 +75,7 @@ commit(router, entry.task, entry.location); // commit like a click
 - Navigation API: `navigate`, `refresh`, `go`/`forward`/`back`, `commit`/`commitReplace`, `createHref`, `getParams`, `match`, `toLocation`, `resolve`, `resolveTo`
 - `invalidate(router)`: drop the session view snapshots in one call — the current view stays rendered (no re-resolve, no re-render) and the next back/forward re-resolves through the guards; the typical call site is right after a logout/account switch, so a POP cannot render the previous account's data or bypass guards that already ran
 - Search validation via [Standard Schema](https://standardschema.dev): a `search` schema on any route level (zod/valibot/arktype, no hard dependency), parsed with `parseSearch`/`parseSearchSync`; failures throw `SearchError`
+- Fine-grained search invalidation via `searchDeps`: declare on each level the search keys its resolution consumes (`[]` = none, a function derives the projection) and a same-path navigation that leaves every declared projection unchanged re-serves the current view snapshot — zero guards, zero loaders, zero lazy imports, exactly like a POP hitting the `viewStack`; undeclared levels keep the resolve-on-every-navigation behavior byte for byte, and `reusableEntry` exports the check for framework setters
 - `preload(router, to, {ttl})`: resolve a target through the guards ahead of time, sharing one task across concurrent callers (in-flight dedup) with a TTL, default 30s; consumed entries are dropped on commit
 - `errorHandler` hook turns resolve failures into fallback views
 - Errors: `NativeRouterError`, `NotFoundError`, `RedirectLoopError`, `SearchError`
@@ -113,6 +114,65 @@ const router = create(
 - `parseSearch(schema, search)` resolves the schema output (async validators are awaited); `parseSearchSync` is the render-time flavor and rejects async validators with a clear error
 - Guards: `beforeLoad` receives the level's parsed search as `ctx.search` — the schema output (parsed with `parseSearch`, so async validators work), or the degraded input on schema-less levels; an invalid search fails the resolution through the `errorHandler` channel like a data-phase search error
 - A rejected validation throws `SearchError` (a `NativeRouterError`) carrying the raw `search` and the reported `issues` — route it through your `errorHandler` like any other resolve failure
+
+## Fine-grained search invalidation
+
+A navigation to the same pathname normally re-resolves the whole chain — every level's `beforeLoad`, `data`/`resolveView` and lazy `component` imports — however small the search change is. The optional `searchDeps` field (`searchDeps?: string[] | ((search: SearchInput) => unknown)`) declares the keys a level's resolution actually consumes; when every level of the matched chain declares them and no projection changed, the current view snapshot is re-served instead:
+
+```ts
+import {create} from '@native-router/core';
+import {createBrowserHistory} from 'history';
+
+const router = create(
+  {
+    path: '',
+    searchDeps: [], // layout level: consumes nothing from the search
+    children: [
+      {
+        path: '/articles',
+        // Array form: the consumed keys, picked from the degraded
+        // parseSearchInput input (strings; repeated keys as arrays)
+        searchDeps: ['tag', 'offset', 'limit'],
+        // Function form: receives the degraded input object; the returned
+        // value is compared after JSON.stringify — return primitives or
+        // stable-shaped values
+        // searchDeps: (search) => [search.tag, search.offset]
+      }
+    ]
+  },
+  createBrowserHistory(),
+  resolveView
+);
+```
+
+- **Fast path:** `navigate()` to the same pathname where **every level of the matched chain declares `searchDeps`** and each level's projection is unchanged between the current entry and the target commits the current view snapshot as the new entry — zero guards, zero loaders, zero lazy loading, exactly like a POP hitting the `viewStack`. Framework setters built on `reusableEntry` (react's `useSearchParams`/`useSetSearch`) take the same path
+- **Undeclared (`undefined`) is today's behavior, byte for byte:** any navigation re-resolves the whole chain as before this field existed; one undeclared level opts the whole chain out of the fast path
+- **The contract cuts both ways — everything the level's resolution reads from the search must be declared:** keys the `search` schema validates strictly belong in `searchDeps` too (the fast path runs no schema, so an invalid value of an undeclared key lands in the URL unchecked — setters like react's `useSetSearch` validate the whole value before navigating regardless), and a `beforeLoad` guard that reads search keys must see them listed or it will not re-run when they change
+- **`hash` and `state` are never compared** — they are not resolve inputs, so on a fully declared chain a hash-only navigation reuses the snapshot too
+- **The re-served view is a snapshot:** it keeps its resolve-time context — `data` and matched `ctx` reflect the entry the view was resolved for; read live search through the framework's search hooks (react's `useSearch`/`useSearchParams` subscribe to history and are always current)
+- POP replay, `initHistoryStack` warm-up, `refresh()` and `invalidate()` are untouched: `invalidate()` drops the snapshots, and the fast path stays off until the next real resolve
+
+### `reusableEntry`
+
+The check `navigate` runs internally, exported for framework navigation setters that commit a search update through the same semantics (react's `useSetSearch`/`useSearchParams` `{replace: true}` branch uses it directly):
+
+```ts
+export function reusableEntry<R extends BaseRoute = BaseRoute, V = any>(
+  router: RouterInstance<R, V>,
+  location: Location
+): ResolvedEntry<V> | undefined;
+```
+
+Same pathname, the current entry has a view snapshot, the matched chain fully declared and projections unchanged → `{location, task: Promise.resolve(current view)}`; `undefined` otherwise — a different pathname, no match, no snapshot, an undeclared level, or a changed projection. "No" is the default: branch on it and resolve for real.
+
+```ts
+import {commit, reusableEntry, toLocation} from '@native-router/core';
+
+const entry = reusableEntry(router, toLocation(router, '/articles?tag=react&offset=20'));
+// entry.location — the target location
+// entry.task    — resolves the current view, nothing resolves in flight
+if (entry) commit(router, entry.task, entry.location); // commit like any resolved entry
+```
 
 ## Params validation
 
