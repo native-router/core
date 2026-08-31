@@ -29,6 +29,7 @@ import type {
   BaseRoute,
   ExtractPathParams,
   HistoryState,
+  NavAction,
   StandardSchemaV1
 } from '../src/types';
 import {
@@ -687,6 +688,52 @@ describe('Router', () => {
       go(router, -1);
       history.location.pathname.should.equal('/foo');
       views.at(-1)!.should.equal('view:/foo');
+    });
+
+    // listen 回调的第二个参数：导航落位方式与导航途径匹配。
+    it('should report the navigation action alongside the view', async () => {
+      const history = createMemoryHistory({initialEntries: ['/foo']});
+      const router = create(
+        {path: '', children: [{path: '/foo'}, {path: '/bar'}, {path: '/baz'}]},
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const events: [string, NavAction][] = [];
+      listen(router, (v, action) => events.push([v as string, action]));
+      await tick();
+      // 丢弃 listen 的初始预热 replace 与其惰性重解析落位。
+      events.length = 0;
+
+      await navigate(router, '/bar');
+      events.should.deepEqual([['view:/bar', 'push']]);
+      events.length = 0;
+
+      go(router, -1);
+      // POP 命中快照：先以 'pop' 上报；随后窗口同步的 replace 对同一视图
+      // 再报一次（视图不变，仅状态同步）。
+      events.should.deepEqual([
+        ['view:/foo', 'pop'],
+        ['view:/foo', 'replace']
+      ]);
+      events.length = 0;
+
+      go(router, 1);
+      events.should.deepEqual([
+        ['view:/bar', 'pop'],
+        ['view:/bar', 'replace']
+      ]);
+      events.length = 0;
+
+      await refresh(router);
+      events.should.deepEqual([['view:/bar', 'replace']]);
+      events.length = 0;
+
+      // 被拦截的 POP：否决本身不上报；回摆落位以 'pop' 重新宣告当前视图。
+      // BlockerFn 语义是「放行」谓词——返回 false 即否决。
+      setBlocker(router, () => false);
+      go(router, -1);
+      await tick();
+      events.should.deepEqual([['view:/bar', 'pop']]);
     });
 
     it('should refresh when forwarding to an entry whose view is not resolved', async () => {

@@ -21,9 +21,10 @@ import {createBrowserHistory} from 'history';
 
 const router = create(routes, createBrowserHistory(), resolveView);
 
-const unlisten = listen(router, (view) => {
+const unlisten = listen(router, (view, action) => {
   // Back/forward lands here instantly with the cached view
-  mount(view);
+  // action: 'push' | 'replace' | 'pop' — how this navigation committed
+  mount(view, action);
 });
 ```
 
@@ -199,9 +200,11 @@ const router = create(
   {baseUrl: '', errorHandler: (e) => renderError(e)}
 );
 
-const unlisten = listen(router, (view) => {
-  // Called on every navigation; POP hits the cached view directly
-  mount(view);
+const unlisten = listen(router, (view, action) => {
+  // Called on every navigation; POP hits the cached view directly.
+  // action: 'push' | 'replace' | 'pop' — the navigation disposition,
+  // handed to e.g. the view-transition bindings as direction.
+  mount(view, action);
 });
 
 await navigate(router, '/users/1'); // guards run, then commit pushes the view

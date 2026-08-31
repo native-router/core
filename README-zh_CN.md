@@ -21,9 +21,10 @@ import {createBrowserHistory} from 'history';
 
 const router = create(routes, createBrowserHistory(), resolveView);
 
-const unlisten = listen(router, (view) => {
+const unlisten = listen(router, (view, action) => {
   // 前进/后退瞬间到达这里，拿到缓存视图
-  mount(view);
+  // action: 'push' | 'replace' | 'pop' —— 本次导航的落位方式
+  mount(view, action);
 });
 ```
 
@@ -199,9 +200,11 @@ const router = create(
   {baseUrl: '', errorHandler: (e) => renderError(e)}
 );
 
-const unlisten = listen(router, (view) => {
+const unlisten = listen(router, (view, action) => {
   // 每次导航都会回调；POP 直接命中缓存视图
-  mount(view);
+  // action: 'push' | 'replace' | 'pop' —— 导航落位方式，可作为
+  // 视图过渡等绑定的方向信号
+  mount(view, action);
 });
 
 await navigate(router, '/users/1'); // 先跑守卫，再 commit 推入视图

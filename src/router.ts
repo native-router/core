@@ -4,6 +4,7 @@ import type {
   Awaitable,
   Location,
   Matched,
+  NavAction,
   Options,
   BaseRoute,
   RouterInstance,
@@ -21,6 +22,16 @@ const MAX_REDIRECTS = 10;
 
 /** Default cache lifetime of {@link preload} results, in milliseconds. */
 const DEFAULT_PRELOAD_TTL = 30_000;
+
+/**
+ * History's upper-case action, normalized to the {@link NavAction}
+ * reported to `listen` callbacks.
+ */
+const NAV_ACTIONS = {
+  PUSH: 'push',
+  REPLACE: 'replace',
+  POP: 'pop'
+} as const;
 
 /**
  * A location resolved through the route guards, together with the view task
@@ -1146,12 +1157,15 @@ function blockedPop(
  * @group Methods
  * @category Router
  * @param router router instance
- * @param onViewChange a callback function will be call when view changed
+ * @param onViewChange a callback function will be call when view changed,
+ * with the navigation action(`'push' | 'replace' | 'pop'`, see
+ * {@link NavAction}) as the second argument — existing single-argument
+ * callbacks stay valid
  * @returns unlisten - A function that may be used to stop listening
  */
 export function listen<R extends BaseRoute = BaseRoute, V = any>(
   router: RouterInstance<R, V>,
-  onViewChange: (v: V) => void
+  onViewChange: (v: V, action: NavAction) => void
 ) {
   const {history} = router;
 
@@ -1165,6 +1179,9 @@ export function listen<R extends BaseRoute = BaseRoute, V = any>(
   const rmListener = history.listen(({action, location}) => {
     const state = location.state as HistoryState | undefined;
     const index = state?.index || 0;
+    // History's upper-case action, normalized to the NavAction reported
+    // to onViewChange callbacks.
+    const navAction: NavAction = NAV_ACTIONS[action];
 
     if (action === 'POP') {
       const blocked = blockedPop(
@@ -1187,7 +1204,7 @@ export function listen<R extends BaseRoute = BaseRoute, V = any>(
         // refresh here would supersede the very chain this branch
         // protects.
         const view = viewAt(router, index);
-        if (view) onViewChange(view);
+        if (view) onViewChange(view, 'pop');
         lastSettled.set(router, {index, location});
         return;
       }
@@ -1196,7 +1213,7 @@ export function listen<R extends BaseRoute = BaseRoute, V = any>(
     cancel(router);
     const view = viewAt(router, index);
 
-    onViewChange(view);
+    onViewChange(view, navAction);
     if (!view) {
       // Lazy fallback for out-of-window slots and window-less legacy
       // state: re-resolving the landed entry also re-serializes the

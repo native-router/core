@@ -23,6 +23,22 @@ export type HistoryState = {
 
 export type WrappedLocation = Location<HistoryState>;
 
+/**
+ * How a navigation committed, reported to `listen` callbacks as the second
+ * argument:
+ * - `'push'`: a new entry landed on top of the stack(`navigate`/`commit`)
+ * - `'replace'`: the current entry was rewritten(`refresh`/`commitReplace`,
+ *   guard redirects, and `listen`'s initial warm-up replace)
+ * - `'pop'`: back/forward landing on a cached view(or a lazy re-resolve),
+ *   including the rewind landing of a vetoed POP
+ *
+ * 导航落位方式，作为 `listen` 回调的第二个参数上报：push 新压栈、
+ * replace 重写当前条目、pop 回退/前进命中快照（含被拦截 POP 的回摆落位）。
+ * @group Types
+ * @category Router
+ */
+export type NavAction = 'push' | 'replace' | 'pop';
+
 export type Awaitable<T> = T | Promise<T>;
 
 /**
