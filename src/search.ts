@@ -85,6 +85,99 @@ export function parseSearchSync<S extends StandardSchemaV1>(
   return result.value as SearchOutputOf<S>;
 }
 
+/**
+ * Output type of {@link writeSchema}: the read schema's output with the
+ * write-optional keys made optional — a key is strippable from the
+ * written URL when it has a default(the validated value equal to it is
+ * omitted) or when it is already optional in the read output(absent
+ * stays absent). Keys that are neither stay required.
+ * @group Types
+ * @category Route
+ */
+export type WriteSearchOutputOf<O, D> = Simplify<
+  {
+    [K in keyof O as K extends keyof D
+      ? never
+      : {} extends Pick<O, K & keyof O>
+        ? never
+        : K]: O[K];
+  } & {
+    [K in keyof O as K extends keyof D
+      ? K
+      : {} extends Pick<O, K & keyof O>
+        ? K
+        : never]?: O[K];
+  }
+>;
+
+/**
+ * Build the write-side twin of a read search schema, for URL writes that
+ * keep the query clean: the next value is validated by the SAME read
+ * schema(coercion and defaults included), then every key whose validated
+ * value equals its default(`Object.is`) is stripped, so defaults never
+ * pollute the URL — reading the stripped URL back through the read
+ * schema restores the exact same value.
+ *
+ * The typical pairing is `useSetSearch(writeSchema(readSchema,
+ * {offset: 0, limit: 10}))` of `@native-router/react`: writes serialize
+ * only what differs from the defaults, while reads keep coercing and
+ * defaulting through the single read contract. Hand-writing the second
+ * schema is no longer needed.
+ *
+ * Sync in, sync out — an async read schema yields an async write schema
+ * (the projection rides the promise), and a rejected read result passes
+ * through untouched.
+ *
+ * @group Methods
+ * @category Route
+ * @param schema the read-side search schema
+ * @param defaults the default values whose equal outputs are omitted
+ * @returns the write projection schema
+ */
+export function writeSchema<O, D extends Partial<O>>(
+  schema: StandardSchemaV1<unknown, O>,
+  defaults: D
+): StandardSchemaV1<unknown, WriteSearchOutputOf<O, D>> {
+  return {
+    '~standard': {
+      version: 1,
+      vendor: '@native-router/core',
+      validate: (input) => {
+        const result = schema['~standard'].validate(input);
+        const project = (
+          result: StandardSchemaV1.Result<unknown>
+        ): StandardSchemaV1.Result<WriteSearchOutputOf<O, D>> =>
+          result.issues
+            ? result
+            : {
+                // The schema's declared output; see parseSearch for the
+                // cast rationale.
+                value: omitDefaults<O, D>(result.value as O, defaults)
+              };
+        return isThenable(result) ? result.then(project) : project(result);
+      }
+    }
+  };
+}
+
+/** Spread-free flattening of {@link WriteSearchOutputOf}'s two halves. */
+type Simplify<T> = {[K in keyof T]: T[K]} & {};
+
+function omitDefaults<O, D extends Partial<O>>(
+  value: O,
+  defaults: D
+): WriteSearchOutputOf<O, D> {
+  const out: Record<string, unknown> = {...(value as Record<string, unknown>)};
+  const table = defaults as Record<string, unknown>;
+  // Undefined-valued keys never serialize into a query; drop them so the
+  // projection matches its optional-keyed type.
+  for (const key of Object.keys(out)) {
+    if (out[key] === undefined || Object.is(out[key], table[key]))
+      delete out[key];
+  }
+  return out as WriteSearchOutputOf<O, D>;
+}
+
 function isThenable<T>(value: T | Promise<T>): value is Promise<T> {
   return typeof (value as Promise<T> | undefined)?.then === 'function';
 }

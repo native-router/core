@@ -39,7 +39,8 @@ import {
   parseParamsSync,
   parseSearch,
   parseSearchInput,
-  parseSearchSync
+  parseSearchSync,
+  writeSchema
 } from '../src/search';
 import {
   NativeRouterError,
@@ -2742,6 +2743,137 @@ describe('search', () => {
     await navigate(router, '/list?page=abc');
     getCurrentView(router).should.equal('fallback:expected a positive integer');
   });
+});
+
+describe('writeSchema', () => {
+  /**
+   * The painless Home fixture shape: `tag` optional, `offset`/`limit`
+   * defaulted by the read contract — the case the factory exists for.
+   */
+  const homeSchema: StandardSchemaV1<unknown, {
+    tag?: string;
+    offset: number;
+    limit: number;
+  }> = {
+    '~standard': {
+      version: 1,
+      vendor: 'test',
+      validate(value) {
+        const raw = (value ?? {}) as Record<string, unknown>;
+        const int = (v: unknown) => {
+          const n = Number(v);
+          return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+        };
+        const out: {
+          tag?: string;
+          offset: number;
+          limit: number;
+        } = {
+          offset: int(raw.offset) ?? 0,
+          limit: int(raw.limit) ?? 10
+        };
+        if (typeof raw.tag === 'string' && raw.tag !== '') out.tag = raw.tag;
+        return {value: out};
+      }
+    }
+  };
+  const homeWrite = writeSchema(homeSchema, {offset: 0, limit: 10});
+
+  it('should validate through the read contract, then strip defaults', () => {
+    const {validate} = homeWrite['~standard'];
+    // The string-world input a URL write degrades into: coercion rides
+    // the read schema, the defaulted equal values are omitted.
+    validate({offset: '0', limit: '10'}).should.deepEqual({value: {}});
+    validate({offset: 20, limit: '10'}).should.deepEqual({value: {offset: 20}});
+    validate({tag: 'dragons', offset: 0, limit: 10}).should.deepEqual({
+      value: {tag: 'dragons'}
+    });
+    // Optional keys absent from the read output stay absent.
+    validate({}).should.deepEqual({value: {}});
+  });
+
+  it('should keep non-defaulted required keys in the projection', () => {
+    const listSchema: StandardSchemaV1<unknown, {page: number; size: number}> =
+      pageSchemaLike();
+    const listWrite = writeSchema(listSchema, {size: 10});
+    const {validate} = listWrite['~standard'];
+    // `page` has no default: required in, required out — only `size`
+    // equal to its default is stripped.
+    validate({page: 2, size: 10}).should.deepEqual({value: {page: 2}});
+    validate({page: 3, size: 25}).should.deepEqual({value: {page: 3, size: 25}});
+    validate({page: 2}).should.deepEqual({value: {page: 2}});
+  });
+
+  it('should pass a rejected read result through untouched', () => {
+    const strict: StandardSchemaV1<unknown, {page: number}> = {
+      '~standard': {
+        version: 1,
+        vendor: 'test',
+        validate: () => ({
+          issues: [{message: 'expected a positive integer', path: ['page']}]
+        })
+      }
+    };
+    const {validate} = writeSchema(strict, {page: 1})['~standard'];
+    const result = validate({page: 'abc'}) as {issues: unknown[]};
+    Should(Array.isArray(result.issues)).be.true();
+    result.issues.should.deepEqual([
+      {message: 'expected a positive integer', path: ['page']}
+    ]);
+  });
+
+  it('should project asynchronously when the read schema is async', async () => {
+    const asyncHome: StandardSchemaV1<unknown, {
+      tag?: string;
+      offset: number;
+      limit: number;
+    }> = {
+      '~standard': {
+        version: 1,
+        vendor: 'test',
+        validate: (value) =>
+          Promise.resolve(homeSchema['~standard'].validate(value))
+      }
+    };
+    const result = await writeSchema(asyncHome, {offset: 0, limit: 10})[
+      '~standard'
+    ].validate({offset: 40, limit: 10});
+    (result as {value: unknown}).should.deepEqual({value: {offset: 40}});
+  });
+
+  it('should strip undefined-valued keys like optional absents', () => {
+    const {validate} = writeSchema(homeSchema, {limit: 10})['~standard'];
+    // `tag: undefined` never serializes into a query and drops out; the
+    // read contract coerces `offset` to its internal 0 — no default is
+    // declared for it here, so the coerced value stays in the projection.
+    validate({tag: undefined, offset: undefined, limit: 10}).should.deepEqual({
+      value: {offset: 0}
+    });
+  });
+
+  /** `{page}`-coercing fixture with an extra defaulted `size`. */
+  function pageSchemaLike(): StandardSchemaV1<unknown, {
+    page: number;
+    size: number;
+  }> {
+    return {
+      '~standard': {
+        version: 1,
+        vendor: 'test',
+        validate(value) {
+          const raw = (value ?? {}) as Record<string, unknown>;
+          const page = Number(raw.page);
+          const size = Number(raw.size);
+          return {
+            value: {
+              page: Number.isInteger(page) && page >= 1 ? page : 1,
+              size: Number.isInteger(size) && size >= 1 ? size : 10
+            }
+          };
+        }
+      }
+    };
+  }
 });
 
 describe('searchDeps', () => {

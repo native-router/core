@@ -115,6 +115,22 @@ const router = create(
 - 守卫：`beforeLoad` 以 `ctx.search` 收到该层解析后的 search——schema 输出（经 `parseSearch` 解析，异步校验器可用），无 schema 的层退化为输入对象；校验不通过时与 data 阶段的 search 错误一样走 `errorHandler` 通道
 - 校验不通过抛出 `SearchError`（`NativeRouterError` 的子类），携带原始 `search` 与 schema 报告的 `issues`——像其他解析失败一样交给 `errorHandler` 处理
 
+### 写 search 不脏 URL
+
+读侧 schema 会 coerce 并补缺省，把它的输出直接写回 URL 就会把缺省值带进 query（每个链接都挂 `?offset=0&limit=10`）。`writeSchema(schema, defaults)` 从读 schema 派生写侧孪生：值先经同一读契约校验，再抹去等于缺省（`Object.is`）的键——被抹后的 URL 读回来还原出同一个值，一份读 schema 管住双向。
+
+```ts
+import {writeSchema} from '@native-router/core';
+
+// 配 @native-router/react 的 useSetSearch：写入只序列化偏离缺省的
+// 部分，读取照旧 coerce/补缺省。
+const write = writeSchema(listSearch, {page: 1});
+write['~standard'].validate({page: 1}); // → {value: {}} —— 干净 URL
+write['~standard'].validate({page: 3}); // → {value: {page: 3}}
+```
+
+投影里「有缺省」或「读侧本就可选」的键变可选，其余键保持必选。同步进同步出（异步读 schema 得到异步写 schema），读侧拒绝的结果原样透传。
+
 ## Search 精细失效
 
 同路径名导航默认重跑整条链——每层的 `beforeLoad`、`data`/`resolveView` 与懒加载 `component`——哪怕 search 的变化再小。可选字段 `searchDeps`（`searchDeps?: string[] | ((search: SearchInput) => unknown)`）声明本层解析实际消费的键；匹配链每层都声明且投影不变时，直接复用当前视图快照：

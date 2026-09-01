@@ -115,6 +115,22 @@ const router = create(
 - Guards: `beforeLoad` receives the level's parsed search as `ctx.search` — the schema output (parsed with `parseSearch`, so async validators work), or the degraded input on schema-less levels; an invalid search fails the resolution through the `errorHandler` channel like a data-phase search error
 - A rejected validation throws `SearchError` (a `NativeRouterError`) carrying the raw `search` and the reported `issues` — route it through your `errorHandler` like any other resolve failure
 
+### Writing search without dirtying the URL
+
+Read schemas coerce and default, so writing their output straight back would put the defaults into the query (`?offset=0&limit=10` on every link). `writeSchema(schema, defaults)` derives the write-side twin from the read schema: the value is validated by the same read contract, then every key equal to its default (`Object.is`) is stripped — reading the stripped URL back restores the exact same value, so one read schema covers both directions.
+
+```ts
+import {writeSchema} from '@native-router/core';
+
+// With `useSetSearch` of @native-router/react: writes serialize only
+// what differs from the defaults, reads keep coercing/defaulting.
+const write = writeSchema(listSearch, {page: 1});
+write['~standard'].validate({page: 1}); // → {value: {}} — clean URL
+write['~standard'].validate({page: 3}); // → {value: {page: 3}}
+```
+
+Keys become optional in the projection when they have a default or are already optional in the read output; other keys stay required. Sync in, sync out (an async read schema yields an async write schema), and a rejected read result passes through untouched.
+
 ## Fine-grained search invalidation
 
 A navigation to the same pathname normally re-resolves the whole chain — every level's `beforeLoad`, `data`/`resolveView` and lazy `component` imports — however small the search change is. The optional `searchDeps` field (`searchDeps?: string[] | ((search: SearchInput) => unknown)`) declares the keys a level's resolution actually consumes; when every level of the matched chain declares them and no projection changed, the current view snapshot is re-served instead:

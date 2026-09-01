@@ -106,3 +106,30 @@ describe('instance context', () => {
     expectTypeOf(baseUrlOnly.context).toEqualTypeOf<undefined>();
   });
 });
+
+describe('WriteSearchOutputOf', () => {
+  it('should make defaulted and read-optional keys optional, keep the rest required', async () => {
+    const {writeSchema} = await import('../src/search');
+    type HomeSearch = {tag?: string; offset: number; limit: number};
+    const read: StandardSchemaV1<unknown, HomeSearch> = {
+      '~standard': {version: 1, vendor: 'test', validate: (v) => ({value: v as HomeSearch})}
+    };
+    const write = writeSchema(read, {offset: 0, limit: 10});
+
+    // All three keys strippable: `tag` read-optional, `offset`/`limit`
+    // defaulted — the painless Home write contract.
+    expectTypeOf(write).toExtend<
+      StandardSchemaV1<unknown, {tag?: string; offset?: number; limit?: number}>
+    >();
+
+    type Only = {page: number; size: number; q?: string};
+    const readList: StandardSchemaV1<unknown, Only> = {
+      '~standard': {version: 1, vendor: 'test', validate: (v) => ({value: v as Only})}
+    };
+    // `page` has no default and is required → stays required; `size`
+    // defaulted and `q` read-optional → optional.
+    expectTypeOf(writeSchema(readList, {size: 10})).toExtend<
+      StandardSchemaV1<unknown, {page: number; size?: number; q?: string}>
+    >();
+  });
+});
