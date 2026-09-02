@@ -1467,14 +1467,33 @@ function blockedPop(
   // Rewind by the distance the POP travelled. Router-driven pushes keep
   // the state index and the history index in lockstep, so the delta
   // between the landed and settled state indexes doubles as the history
-  // delta. A zero delta(same-index POP between stateless external
-  // entries) cannot be rewound — `go(0)` goes nowhere — so the URL
-  // stays on the vetoed target while the router stacks and the
-  // rendered view keep the current entry.
+  // delta.
   const delta = index - settled.index;
   if (delta) {
     pendingRewind.set(router, true);
     history.go(-delta);
+  } else {
+    // Zero delta(same-index POP between stateless external entries)
+    // cannot be rewound — `go(0)` goes nowhere — so the settled URL is
+    // restored with a replace instead, keeping the address bar, the
+    // state index and the rendered view on the entry the router never
+    // left. Trade-off: unlike a rewind POP, the restore rewrites the
+    // landed entry's state, which is exactly what we want here — the
+    // vetoed target was never part of the session. The pending mark
+    // routes the restore's own synchronous REPLACE landing through the
+    // no-cancel re-announce branch in {@link listen}, the same
+    // semantics a rewind landing gets: an in-flight chain survives the
+    // veto untouched.
+    pendingRewind.set(router, true);
+    history.replace(createPath(settled.location), {
+      index: settled.index,
+      // `settled.location` is a raw history location, so its `state` is
+      // the wrapped {index, state?, ...} record — unwrap the user state
+      // the settled entry carried(see getLocation) instead of nesting
+      // the wrapper a level deeper.
+      state: ((settled.location.state || {}) as Partial<HistoryState>).state,
+      ...serializeStack(router)
+    });
   }
   return 'vetoed';
 }
@@ -1535,6 +1554,17 @@ export function listen<R extends BaseRoute = BaseRoute, V = any>(
         lastSettled.set(router, {index, location});
         return;
       }
+    } else if (action === 'REPLACE' && pendingRewind.delete(router)) {
+      // The zero-delta veto's URL restore: its own landing, the same
+      // semantics a rewind POP gets — the router never left this entry,
+      // so re-announce without cancelling an in-flight chain. The mark
+      // is only ever pending across a commit(canceled there, see
+      // cancelPendingRewind) or a rewind landing, so no ordinary
+      // replace is mistaken for a restore.
+      const view = viewAt(router, index);
+      if (view) onViewChange(view, 'replace');
+      lastSettled.set(router, {index, location});
+      return;
     }
 
     cancel(router);

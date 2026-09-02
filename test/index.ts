@@ -2343,6 +2343,43 @@ describe('Router', () => {
       views.should.deepEqual(['view:/d']);
       unblockAgain();
     });
+
+    it('should restore the settled URL after a zero-delta vetoed POP', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      // Two foreign entries sharing one state index: the POP between
+      // them reads delta 0, so there is nothing to rewind.
+      history.push('/b', {index: 1});
+      history.push('/c', {index: 1});
+      const router = create(
+        {path: '', children: [{path: '/a'}, {path: '/b'}, {path: '/c'}]},
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const views: string[] = [];
+      listen(router, (v) => views.push(v as string));
+      await tick();
+      views.length = 0;
+      const asks: [string, string][] = [];
+      setBlocker(router, (to, from) => {
+        asks.push([to, from]);
+        return false;
+      });
+
+      go(router, -1);
+      // The vetoed same-index POP cannot be rewound, so the settled
+      // entry is restored with a replace: the URL, the state index and
+      // the re-announced view are all back on /c.
+      history.location.pathname.should.equal('/c');
+      (history.location.state as HistoryState).index.should.equal(1);
+      // The restore re-serialized the session window into the entry,
+      // so the router still owns it after the veto.
+      (
+        (history.location.state as HistoryState).locationStack ?? []
+      ).length.should.equal(1);
+      asks.should.deepEqual([['/b', '/c']]);
+      views.should.deepEqual(['view:/c']);
+      getCurrentView(router).should.equal('view:/c');
+    });
   });
 
   describe('preload', () => {
