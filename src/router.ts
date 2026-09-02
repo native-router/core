@@ -1628,18 +1628,21 @@ export function mergeMatchedParams<R extends BaseRoute = BaseRoute>(
  * matching the current entry of {@link RouterInstance.locationStack} so
  * they stay correct even when the view stack holds resolved views
  * (e.g. React elements) instead of match results. Merges params of all
- * matched levels; deeper levels override shallower ones.
+ * matched levels; deeper levels override shallower ones. Returns
+ * `undefined` when the current entry's slot is outside the restored
+ * window — its location is unknown to this session, so there is nothing
+ * to merge (a path that matches no route still yields `{}`).
  * @group Methods
  * @category Router
  * @param router router instance
- * @returns the params object
+ * @returns the merged params object, or `undefined` for out-of-window slots
  */
 export function getParams<R extends BaseRoute = BaseRoute>(
   router: RouterInstance<R>
-): Record<string, string> {
+): Record<string, string> | undefined {
   const {index} = getHistoryState(router);
   const location =
     router.locationStack[index - (router as RouterCore<R>).baseIndex];
-  if (!location) return {};
+  if (!location) return undefined;
   return mergeMatchedParams(match(router, location.pathname) ?? []);
 }

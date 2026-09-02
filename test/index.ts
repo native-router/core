@@ -1590,7 +1590,7 @@ describe('Router', () => {
         (matched) => Promise.resolve(matched)
       );
       return navigate(router, '/users/123/posts/456').then(() => {
-        getParams(router).should.deepEqual({id: '123', postId: '456'});
+        getParams(router)!.should.deepEqual({id: '123', postId: '456'});
       });
     });
 
@@ -1602,7 +1602,7 @@ describe('Router', () => {
         () => Promise.resolve(null)
       );
       await navigate(router, '/users/123');
-      getParams(router).should.deepEqual({id: '123'});
+      getParams(router)!.should.deepEqual({id: '123'});
     });
 
     it('should let deeper params override same-name shallow params', async () => {
@@ -1616,10 +1616,10 @@ describe('Router', () => {
         () => Promise.resolve(null)
       );
       await navigate(router, '/42/posts/99');
-      getParams(router).should.deepEqual({id: '99'});
+      getParams(router)!.should.deepEqual({id: '99'});
     });
 
-    it('should return an empty object when the current entry is outside the restored window', () => {
+    it('should return undefined when the current entry is outside the restored window', () => {
       const history = createMemoryHistory({
         initialEntries: [
           {
@@ -1641,12 +1641,14 @@ describe('Router', () => {
         () => Promise.resolve(null)
       );
       // The landed entry(index 0) precedes the restored window(base 2),
-      // so its slot is out-of-window and reads as empty.
+      // so its slot is out-of-window: the location is unknown to the
+      // session and there is nothing to merge — `undefined`, the
+      // out-of-band signal, not a silently wrong `{}`.
       router.locationStack
         .map((l) => l.pathname)
         .should.deepEqual(['/a', '/b']);
       (router as any).baseIndex.should.equal(2);
-      getParams(router).should.deepEqual({});
+      Should(getParams(router)).be.undefined();
     });
 
     it('should return an empty object when the current path matches no route', () => {
@@ -1656,7 +1658,7 @@ describe('Router', () => {
         history,
         () => Promise.resolve(null)
       );
-      getParams(router).should.deepEqual({});
+      getParams(router)!.should.deepEqual({});
     });
   });
 
@@ -2815,7 +2817,7 @@ describe('Router', () => {
 
       // Window-relative accessors stay correct after the eviction.
       getCurrentView(router).should.equal('view:/e/7');
-      getParams(router).should.deepEqual({id: '7'});
+      getParams(router)!.should.deepEqual({id: '7'});
     });
 
     it('should lazily refresh when POPping outside the window without crashing', async () => {
@@ -2908,7 +2910,7 @@ describe('Router', () => {
       // listen()'s initial lazy refresh of the current entry.
       resolveView.callCount.should.equal(1);
       getCurrentView(router2).should.equal('view2:/e/7:1');
-      getParams(router2).should.deepEqual({id: '7'});
+      getParams(router2)!.should.deepEqual({id: '7'});
 
       // In-window back lands on the warmed-by-refresh slots lazily but
       // without leaving the window.
