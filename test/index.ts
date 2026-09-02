@@ -49,6 +49,7 @@ import {
   RedirectLoopError,
   SearchError
 } from '../src/errors';
+import {createAsyncGoHistory} from './util';
 
 describe('Router', () => {
   describe('match', () => {
@@ -2279,6 +2280,68 @@ describe('Router', () => {
         ['/app/a', '/app/b?x=1']
       ]);
       history.location.pathname.should.equal('/app/a');
+    });
+
+    it('should let a user navigation win over a rewind still in flight', async () => {
+      // A browser-like history: the veto's rewind `go()` stays pending
+      // across the user's next navigation(memory history applies `go`
+      // synchronously, so it can never produce this interleaving).
+      const history = createAsyncGoHistory({initialEntries: ['/a']});
+      const router = create(
+        {
+          path: '',
+          children: [{path: '/a'}, {path: '/b'}, {path: '/c'}, {path: '/d'}]
+        },
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const views: string[] = [];
+      listen(router, (v) => views.push(v as string));
+      await tick();
+      await navigate(router, '/b');
+      await navigate(router, '/c');
+      // Land on /b with a forward entry(/c) behind it: the next vetoed
+      // POP is a real forward traversal, not a clamped no-op.
+      go(router, -1);
+      await tick();
+      views.length = 0;
+
+      // The unsaved-changes shape: everything is vetoed except the
+      // deliberate escape to /d.
+      const unblock = setBlocker(router, (to) => to === '/d');
+
+      // A vetoed FORWARD POP(to /c): the rewind go(-1) is queued but
+      // has not landed yet.
+      forward(router);
+      await tick();
+
+      // The user pushes /d before the rewind lands. The commit cancels
+      // the pending rewind; the late traversal then walks the normal
+      // POP path, is vetoed again, and its own rewind brings the
+      // session back to the pushed entry.
+      await navigate(router, '/d');
+      await tick();
+      await tick();
+
+      history.location.pathname.should.equal('/d');
+      (history.location.state as HistoryState).index.should.equal(3);
+      // Every announcement after the push is the pushed view — the
+      // rewind never re-announced the stale /c snapshot.
+      views.should.deepEqual(['view:/d', 'view:/d']);
+      getCurrentView(router).should.equal('view:/d');
+      router.viewStack[3].should.equal('view:/d');
+
+      // The session is left coherent: another blocked POP still rewinds
+      // home instead of the flag being stuck or the stack drifting.
+      views.length = 0;
+      unblock();
+      const unblockAgain = setBlocker(router, () => false);
+      back(router);
+      await tick();
+      await tick();
+      history.location.pathname.should.equal('/d');
+      views.should.deepEqual(['view:/d']);
+      unblockAgain();
     });
   });
 

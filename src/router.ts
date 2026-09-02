@@ -1038,6 +1038,16 @@ function commitBase<R extends BaseRoute = BaseRoute, V = any>(
   onResolved: (resolvedView: V, entry: ResolvedEntry<V>) => void
 ): Promise<void> {
   const core = router as RouterCore<R, V>;
+  // A pending rewind(a vetoed POP's counter-`go()`, still in flight in
+  // real browsers where popstate lands asynchronously) is superseded by
+  // this user-driven commit: the forward navigation wins, the rewind is
+  // canceled. The browser may still deliver the rewind traversal's own
+  // POP afterwards — without the pending mark it walks the normal POP
+  // path, so the blockers re-decide with the freshly committed entry as
+  // `from`, instead of the traversal being swallowed as a "rewind
+  // landing" that re-announces a view at an index the rewind was never
+  // aimed at.
+  cancelPendingRewind(router);
   const {currentGuard, onLoadingChange = noop} = router;
   if (router.resolving) {
     // Cancel current resolve
@@ -1334,9 +1344,24 @@ const lastSettled = new WeakMap<
 /**
  * Pending blocker rewind per router: a rewind `go()` is in flight. The
  * rewind's own POP must not query the blockers again — they would veto
- * it too and ping-pong the history forever.
+ * it too and ping-pong the history forever — and it is canceled by the
+ * commit pipeline when a user-driven navigation supersedes it(see
+ * {@link cancelPendingRewind}).
  */
 const pendingRewind = new WeakMap<RouterInstance<any>, true>();
+
+/**
+ * Cancel a pending rewind: the next POP the router observes is no
+ * longer the rewind's own landing. Called by the commit pipeline(see
+ * {@link commitBase}) the moment a user-driven navigation begins while
+ * a vetoed POP's rewind `go()` is still in flight — the forward
+ * navigation wins, and the rewind traversal's late POP walks the normal
+ * POP path(blockers re-asked, `from` the freshly committed entry)
+ * instead of being mistaken for the rewind's landing.
+ */
+function cancelPendingRewind(router: RouterInstance<any>) {
+  pendingRewind.delete(router);
+}
 
 /**
  * Register a navigation blocker. Every {@link navigate}, {@link commit},
