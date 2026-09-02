@@ -26,6 +26,13 @@ const MAX_REDIRECTS = 10;
 const DEFAULT_PRELOAD_TTL = 30_000;
 
 /**
+ * Default bound of concurrently in-flight {@link preload} resolutions.
+ * Over the bound the oldest preload is aborted FIFO, so a hover sweep
+ * over a list of prefetch links never accumulates unbounded requests.
+ */
+const DEFAULT_PRELOAD_CONCURRENCY = 4;
+
+/**
  * History's upper-case action, normalized to the {@link NavAction}
  * reported to `listen` callbacks.
  */
@@ -41,6 +48,16 @@ const NAV_ACTIONS = {
  * location and `task` resolves the view of the target route.
  */
 export type ResolvedEntry<V> = {location: Location; task: Promise<V>};
+
+/**
+ * A registered in-flight {@link preload} resolution: the controller its
+ * guards/loaders run under and the entry promise handed to callers.
+ * FIFO-ordered by registration in {@link RouterCore.preloadInFlight}.
+ */
+type PreloadFlight<V> = {
+  controller: AbortController;
+  entry: Promise<ResolvedEntry<V>>;
+};
 
 /**
  * Cache record of {@link preload}: the resolution promise of the
@@ -68,6 +85,9 @@ type PreloadCacheEntry<V> = {
  *   `history index - baseIndex`; entries whose slot falls outside the
  *   memory window re-resolve lazily when landed on.
  * - `preloadCache`: router-level cache of {@link preload} results.
+ * - `preloadInFlight`: in-flight {@link preload} resolutions in FIFO
+ *   order, bounded by {@link Options.preloadConcurrency}; the oldest
+ *   is aborted once the bound is exceeded.
  * - `resolvingController`: the in-flight chain's AbortController. It is
  *   aborted(supersede/cancel) only while the chain is in flight; a
  *   settled chain's controller is left alone so its contexts never
@@ -76,6 +96,7 @@ type PreloadCacheEntry<V> = {
 type RouterCore<R extends BaseRoute, V = any> = RouterInstance<R, V> & {
   baseIndex: number;
   preloadCache?: Map<string, PreloadCacheEntry<V>>;
+  preloadInFlight?: Map<string, PreloadFlight<V>>;
   resolvingController?: AbortController;
 };
 
@@ -136,6 +157,8 @@ export function create<R extends BaseRoute = BaseRoute, V = any, C = undefined>(
     ...options,
     baseUrl: options?.baseUrl || '',
     maxStackDepth: options?.maxStackDepth || DEFAULT_MAX_STACK_DEPTH,
+    preloadConcurrency:
+      options?.preloadConcurrency || DEFAULT_PRELOAD_CONCURRENCY,
     // Instance context: explicit (not just the spread above) so the
     // member always exists — `undefined` for context-less routers.
     context: options?.context
@@ -543,9 +566,10 @@ export function resolveTo<R extends BaseRoute = BaseRoute, V = any>(
  * their {@link GuardContext contexts}, the view task's
  * {@link ResolveViewContext context} carries it on, and it is aborted
  * once the navigation is superseded or cancelled. Standalone callers
- * that pass nothing(e.g. {@link preload}) get a signal that never
- * aborts — their resolution may be shared, so cancelling it on behalf of
- * one consumer is not sound yet.
+ * that pass nothing get a signal that never aborts; {@link preload}
+ * passes its own controller's signal, which the bounded-concurrency
+ * policy may abort once the preload is evicted as the oldest in-flight
+ * one.
  *
  * A guard's context also carries the level's parsed
  * {@link GuardContext.search search}: the {@link BaseRoute.search schema}
@@ -691,6 +715,15 @@ export async function resolveEntry<R extends BaseRoute = BaseRoute, V = any>(
  * a later preload re-resolves fresh state, while callers still holding
  * the old entry keep their references.
  *
+ * Prefetches are bounded and cancelable: each resolution owns an
+ * `AbortController` handed to its guards and loaders as their
+ * `ctx.signal`, and once more than {@link Options.preloadConcurrency}
+ * (default 4) preloads are in flight the oldest is aborted FIFO — its
+ * cache slot is dropped and its failure is swallowed as background
+ * noise, so a hover sweep over a list of prefetch links never
+ * accumulates unbounded requests. A preload consumed by a committing
+ * navigation is never aborted: consumption detaches it from the bound.
+ *
  * @group Methods
  * @category Router
  * @param router router instance
@@ -711,7 +744,12 @@ export function preload<R extends BaseRoute = BaseRoute, V = any>(
     return cached.entry;
   }
   prunePreloadCache(cache);
-  const entry = resolveEntry<R, V>(router, location);
+  // The preload owns its controller: guards and loaders observe its
+  // signal, and the bounded-concurrency policy below may abort it.
+  const controller = new AbortController();
+  const entry = resolveEntry<R, V>(router, location, {
+    signal: controller.signal
+  });
   const record: PreloadCacheEntry<V> = {
     entry,
     expires: Date.now() + (opts?.ttl ?? DEFAULT_PRELOAD_TTL)
@@ -727,7 +765,76 @@ export function preload<R extends BaseRoute = BaseRoute, V = any>(
       if (cache.get(key)?.entry === entry) cache.delete(key);
     }
   );
+  trackPreloadFlight<V>(router, key, {controller, entry});
   return entry;
+}
+
+/**
+ * Register an in-flight preload and enforce the concurrency bound:
+ * over {@link Options.preloadConcurrency} in-flight preloads the
+ * oldest(FIFO head) is aborted and evicted — its resolution dies as
+ * background noise instead of piling up. Map iteration order is
+ * insertion order, so the queue order is registration order; a
+ * re-preloaded key re-queues at the tail. Flights leave the window on
+ * their own once the entry AND its view task settle.
+ */
+function trackPreloadFlight<V>(
+  router: RouterInstance<any, V>,
+  key: string,
+  flight: PreloadFlight<V>
+) {
+  const core = router as RouterCore<any, V>;
+  if (!core.preloadInFlight) core.preloadInFlight = new Map();
+  const inFlight = core.preloadInFlight;
+  inFlight.delete(key);
+  inFlight.set(key, flight);
+  const leave = () => {
+    if (inFlight.get(key) === flight) inFlight.delete(key);
+  };
+  flight.entry.then((resolved) => {
+    resolved.task.then(leave, leave);
+  }, leave);
+  const limit = core.preloadConcurrency || DEFAULT_PRELOAD_CONCURRENCY;
+  while (inFlight.size > limit) {
+    const oldestKey = inFlight.keys().next().value;
+    if (oldestKey === undefined) break;
+    const oldest = inFlight.get(oldestKey)!;
+    inFlight.delete(oldestKey);
+    // Stop the superseded prefetch's requests: guards and loaders
+    // observing the signal bail out instead of finishing in the dark.
+    oldest.controller.abort();
+    // Background semantics: the abort is not an error anyone observes,
+    // and the cache slot is dropped so a later call re-resolves fresh.
+    const record = core.preloadCache?.get(oldestKey);
+    if (record?.entry === oldest.entry) core.preloadCache?.delete(oldestKey);
+    oldest.entry.catch(noop);
+  }
+}
+
+/**
+ * Detach the preloads of a committed target from the concurrency
+ * bound: their resolution is now the navigation chain itself, so an
+ * eviction abort must never kill them. Mirrors {@link evictPreloadCache}
+ * — the direct key plus redirecting records whose terminal resolves to
+ * the committed location.
+ */
+function consumePreloadFlights<V>(
+  router: RouterInstance<any, V>,
+  location: Location
+) {
+  const core = router as RouterCore<any, V>;
+  if (!core.preloadInFlight?.size) return;
+  const key = preloadLocationKey(location);
+  core.preloadInFlight.forEach((flight, k) => {
+    const record = core.preloadCache?.get(k);
+    if (
+      k === key ||
+      (record?.terminal !== undefined &&
+        preloadLocationKey(record.terminal) === key)
+    ) {
+      core.preloadInFlight!.delete(k);
+    }
+  });
 }
 
 function preloadLocationKey(location: Location) {
@@ -797,6 +904,10 @@ export function commit<R extends BaseRoute = BaseRoute, V = any>(
     resolvePromise.catch(noop);
     return Promise.resolve();
   }
+  // This commit consumes a preload entry(a typical caller hands over
+  // `preload()`'s resolved task): its resolution is now the navigation
+  // chain itself, so the concurrency bound must never abort it.
+  consumePreloadFlights<V>(router, location);
   // Wrap the raw task so external callers share the guarded entry
   // pipeline; the entry location is the given one, as-is.
   return pushEntry(
@@ -870,6 +981,9 @@ export function commitReplace<R extends BaseRoute = BaseRoute, V = any>(
     resolvePromise.catch(noop);
     return Promise.resolve();
   }
+  // Same consumption detach as commit: a replaced-in preload entry must
+  // not be aborted by the concurrency bound while it commits.
+  consumePreloadFlights<V>(router, location);
   return replaceEntry(
     router as RouterCore<R, V>,
     Promise.resolve({location, task: resolvePromise} as ResolvedEntry<V>),

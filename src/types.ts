@@ -469,6 +469,25 @@ export type Options<V, C = undefined> = {
   errorHandler?(e: Error): V | Promise<V>;
   onLoadingChange?(status?: 'pending' | 'resolved' | 'rejected'): void;
   /**
+   * Max number of {@link preload} resolutions in flight at once,
+   * default 4. Once exceeded, the oldest still-running preload is
+   * aborted FIFO — its guards and loaders observe the abort through
+   * their `ctx.signal`, its cache slot is dropped, and its failure is
+   * swallowed as background noise. A preload consumed by a committing
+   * navigation (`commit`/`commitReplace`) is detached from the bound
+   * and never aborted by it. A single hover-prefetch never hits the
+   * bound; it exists so sweeping a list of prefetch links cannot
+   * accumulate unbounded requests.
+   *
+   * 同时在飞的 {@link preload} 解析数量上限，默认 4。超出后最旧的
+   * 预取按 FIFO 被 abort——守卫与加载器经 `ctx.signal` 感知中止，缓存
+   * 槽位随之丢弃，失败按后台语义吞掉。被导航消费（`commit`/
+   * `commitReplace`）的预取脱离该上限约束、绝不会被它中止。单个
+   * hover 预取不会触达上限；上限存在的意义是扫过一列预取链接时
+   * 请求不会无限累积。
+   */
+  preloadConcurrency?: number;
+  /**
    * Max number of locations serialized into the history state window,
    * see {@link HistoryState.locationStack}.
    *

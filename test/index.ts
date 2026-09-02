@@ -2467,6 +2467,211 @@ describe('Router', () => {
       // under its live signal, available to a later consumer.
       history.location.pathname.should.equal('/b');
     });
+
+    describe('bounded concurrency', () => {
+      const tick = () =>
+        new Promise((done) => {
+          setTimeout(done);
+        });
+
+      it('should abort the oldest in-flight preload FIFO over the bound', async () => {
+        const signals = new Map<string, AbortSignal>();
+        const targets = ['/p1', '/p2', '/p3', '/p4'];
+        const history = createMemoryHistory({initialEntries: ['/a']});
+        const router = create(
+          {
+            path: '',
+            children: [
+              {path: '/a'},
+              ...targets.map((target) => ({
+                path: target,
+                beforeLoad({signal}: {signal: AbortSignal}) {
+                  signals.set(target, signal);
+                  return new Promise<undefined>(() => {});
+                }
+              }))
+            ]
+          },
+          history,
+          () => Promise.resolve('view'),
+          {preloadConcurrency: 2}
+        );
+
+        preload(router, '/p1');
+        preload(router, '/p2');
+        await tick();
+        signals.get('/p1')!.aborted.should.be.false();
+        signals.get('/p2')!.aborted.should.be.false();
+
+        // Over the bound: the oldest(/p1) is aborted, the rest live.
+        preload(router, '/p3');
+        await tick();
+        signals.get('/p1')!.aborted.should.be.true();
+        signals.get('/p2')!.aborted.should.be.false();
+        signals.get('/p3')!.aborted.should.be.false();
+
+        // The next overflow evicts the next oldest(/p2).
+        preload(router, '/p4');
+        await tick();
+        signals.get('/p2')!.aborted.should.be.true();
+        signals.get('/p3')!.aborted.should.be.false();
+        signals.get('/p4')!.aborted.should.be.false();
+      });
+
+      it('should evict the aborted preload from the cache so a later call retries', async () => {
+        const calls: string[] = [];
+        const history = createMemoryHistory({initialEntries: ['/a']});
+        const router = create(
+          {
+            path: '',
+            children: [
+              {path: '/a'},
+              {path: '/b'},
+              {
+                path: '/c',
+                beforeLoad({signal}: {signal: AbortSignal}) {
+                  calls.push('c');
+                  return new Promise<void>((_resolve, reject) => {
+                    signal.addEventListener('abort', () =>
+                      reject(new Error('aborted'))
+                    );
+                  });
+                }
+              }
+            ]
+          },
+          history,
+          () => Promise.resolve('view'),
+          {preloadConcurrency: 1}
+        );
+
+        const evicted = preload(router, '/c').then(
+          () => 'resolved',
+          (e) => `rejected:${(e as Error).message}`
+        );
+        // Squeezes /c out of the 1-wide window and aborts it.
+        preload(router, '/b');
+        (await evicted).should.equal('rejected:aborted');
+        calls.should.deepEqual(['c']);
+
+        // The evicted slot is gone: the next preload re-runs the guard.
+        preload(router, '/c');
+        await tick();
+        calls.should.deepEqual(['c', 'c']);
+      });
+
+      it('should default the bound to four in-flight preloads', async () => {
+        const signals = new Map<string, AbortSignal>();
+        const history = createMemoryHistory({initialEntries: ['/a']});
+        const router = create(
+          {
+            path: '',
+            children: [
+              {path: '/a'},
+              ...['/p1', '/p2', '/p3', '/p4', '/p5'].map((target) => ({
+                path: target,
+                beforeLoad({signal}: {signal: AbortSignal}) {
+                  signals.set(target, signal);
+                  return new Promise<undefined>(() => {});
+                }
+              }))
+            ]
+          },
+          history,
+          () => Promise.resolve('view')
+        );
+
+        preload(router, '/p1');
+        preload(router, '/p2');
+        preload(router, '/p3');
+        preload(router, '/p4');
+        await tick();
+        signals.forEach((signal) => signal.aborted.should.be.false());
+
+        preload(router, '/p5');
+        await tick();
+        signals.get('/p1')!.aborted.should.be.true();
+        ['/p2', '/p3', '/p4', '/p5'].forEach((p) =>
+          signals.get(p)!.aborted.should.be.false()
+        );
+      });
+
+      it('should not produce unhandled rejections when an evicted preload aborts', async () => {
+        const unhandled: unknown[] = [];
+        const onUnhandled = (reason: unknown) => unhandled.push(reason);
+        process.on('unhandledRejection', onUnhandled);
+        const history = createMemoryHistory({initialEntries: ['/a']});
+        const router = create(
+          {
+            path: '',
+            children: [
+              {path: '/a'},
+              ...['/b', '/c', '/d'].map((target) => ({
+                path: target,
+                beforeLoad({signal}: {signal: AbortSignal}) {
+                  return new Promise<void>((_resolve, reject) => {
+                    signal.addEventListener('abort', () =>
+                      reject(new Error(`aborted:${target}`))
+                    );
+                  });
+                }
+              }))
+            ]
+          },
+          history,
+          () => Promise.resolve('view'),
+          {preloadConcurrency: 1}
+        );
+
+        // The return promises are dropped on purpose: nobody awaits an
+        // evicted background prefetch.
+        preload(router, '/b');
+        preload(router, '/c');
+        preload(router, '/d');
+        await tick();
+        await tick();
+        await tick();
+        process.off('unhandledRejection', onUnhandled);
+        unhandled.should.deepEqual([]);
+      });
+
+      it('should never abort a preload a committing navigation consumes', async () => {
+        const viewSignals = new Map<string, AbortSignal>();
+        let releaseView!: () => void;
+        const parkedView = new Promise<string>((done) => {
+          releaseView = () => done('view:/slow');
+        });
+        const history = createMemoryHistory({initialEntries: ['/a']});
+        const router = create(
+          {
+            path: '',
+            children: [{path: '/a'}, {path: '/slow'}, {path: '/x'}]
+          },
+          history,
+          (matched, {signal}) => {
+            viewSignals.set(matched.at(-1)!.route.path, signal);
+            return matched.at(-1)!.route.path === '/slow'
+              ? parkedView
+              : Promise.resolve('view:x');
+          },
+          {preloadConcurrency: 1}
+        );
+
+        const entry = await preload(router, '/slow');
+        // The entry has settled but its view task is still parked, so
+        // the flight is in the window; committing consumes it.
+        const committed = commit(router, entry.task, entry.location);
+        // A new preload over the 1-wide bound must not evict the
+        // consumed flight — /slow's signal stays live...
+        preload(router, '/x');
+        await tick();
+        viewSignals.get('/slow')!.aborted.should.be.false();
+        // ...and the navigation completes once the view settles.
+        releaseView();
+        await committed;
+        history.location.pathname.should.equal('/slow');
+      });
+    });
   });
 
   describe('bounded memory stack', () => {
