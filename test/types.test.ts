@@ -112,7 +112,11 @@ describe('WriteSearchOutputOf', () => {
     const {writeSchema} = await import('../src/search');
     type HomeSearch = {tag?: string; offset: number; limit: number};
     const read: StandardSchemaV1<unknown, HomeSearch> = {
-      '~standard': {version: 1, vendor: 'test', validate: (v) => ({value: v as HomeSearch})}
+      '~standard': {
+        version: 1,
+        vendor: 'test',
+        validate: (v) => ({value: v as HomeSearch})
+      }
     };
     const write = writeSchema(read, {offset: 0, limit: 10});
 
@@ -124,7 +128,11 @@ describe('WriteSearchOutputOf', () => {
 
     type Only = {page: number; size: number; q?: string};
     const readList: StandardSchemaV1<unknown, Only> = {
-      '~standard': {version: 1, vendor: 'test', validate: (v) => ({value: v as Only})}
+      '~standard': {
+        version: 1,
+        vendor: 'test',
+        validate: (v) => ({value: v as Only})
+      }
     };
     // `page` has no default and is required → stays required; `size`
     // defaulted and `q` read-optional → optional.

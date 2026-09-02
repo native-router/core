@@ -96,17 +96,21 @@ export function parseSearchSync<S extends StandardSchemaV1>(
  */
 export type WriteSearchOutputOf<O, D> = Simplify<
   {
-    [K in keyof O as K extends keyof D
-      ? never
-      : {} extends Pick<O, K & keyof O>
+    [
+      K in keyof O as K extends keyof D
         ? never
-        : K]: O[K];
+        : {} extends Pick<O, K & keyof O>
+          ? never
+          : K
+    ]: O[K];
   } & {
-    [K in keyof O as K extends keyof D
-      ? K
-      : {} extends Pick<O, K & keyof O>
+    [
+      K in keyof O as K extends keyof D
         ? K
-        : never]?: O[K];
+        : {} extends Pick<O, K & keyof O>
+          ? K
+          : never
+    ]?: O[K];
   }
 >;
 
@@ -145,14 +149,14 @@ export function writeSchema<O, D extends Partial<O>>(
       validate: (input) => {
         const result = schema['~standard'].validate(input);
         const project = (
-          result: StandardSchemaV1.Result<unknown>
+          outcome: StandardSchemaV1.Result<unknown>
         ): StandardSchemaV1.Result<WriteSearchOutputOf<O, D>> =>
-          result.issues
-            ? result
+          outcome.issues
+            ? outcome
             : {
                 // The schema's declared output; see parseSearch for the
                 // cast rationale.
-                value: omitDefaults<O, D>(result.value as O, defaults)
+                value: omitDefaults<O, D>(outcome.value as O, defaults)
               };
         return isThenable(result) ? result.then(project) : project(result);
       }
@@ -171,10 +175,10 @@ function omitDefaults<O, D extends Partial<O>>(
   const table = defaults as Record<string, unknown>;
   // Undefined-valued keys never serialize into a query; drop them so the
   // projection matches its optional-keyed type.
-  for (const key of Object.keys(out)) {
+  Object.keys(out).forEach((key) => {
     if (out[key] === undefined || Object.is(out[key], table[key]))
       delete out[key];
-  }
+  });
   return out as WriteSearchOutputOf<O, D>;
 }
 

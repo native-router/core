@@ -2750,11 +2750,14 @@ describe('writeSchema', () => {
    * The painless Home fixture shape: `tag` optional, `offset`/`limit`
    * defaulted by the read contract — the case the factory exists for.
    */
-  const homeSchema: StandardSchemaV1<unknown, {
-    tag?: string;
-    offset: number;
-    limit: number;
-  }> = {
+  const homeSchema: StandardSchemaV1<
+    unknown,
+    {
+      tag?: string;
+      offset: number;
+      limit: number;
+    }
+  > = {
     '~standard': {
       version: 1,
       vendor: 'test',
@@ -2800,7 +2803,9 @@ describe('writeSchema', () => {
     // `page` has no default: required in, required out — only `size`
     // equal to its default is stripped.
     validate({page: 2, size: 10}).should.deepEqual({value: {page: 2}});
-    validate({page: 3, size: 25}).should.deepEqual({value: {page: 3, size: 25}});
+    validate({page: 3, size: 25}).should.deepEqual({
+      value: {page: 3, size: 25}
+    });
     validate({page: 2}).should.deepEqual({value: {page: 2}});
   });
 
@@ -2823,11 +2828,14 @@ describe('writeSchema', () => {
   });
 
   it('should project asynchronously when the read schema is async', async () => {
-    const asyncHome: StandardSchemaV1<unknown, {
-      tag?: string;
-      offset: number;
-      limit: number;
-    }> = {
+    const asyncHome: StandardSchemaV1<
+      unknown,
+      {
+        tag?: string;
+        offset: number;
+        limit: number;
+      }
+    > = {
       '~standard': {
         version: 1,
         vendor: 'test',
@@ -2852,10 +2860,13 @@ describe('writeSchema', () => {
   });
 
   /** `{page}`-coercing fixture with an extra defaulted `size`. */
-  function pageSchemaLike(): StandardSchemaV1<unknown, {
-    page: number;
-    size: number;
-  }> {
+  function pageSchemaLike(): StandardSchemaV1<
+    unknown,
+    {
+      page: number;
+      size: number;
+    }
+  > {
     return {
       '~standard': {
         version: 1,
