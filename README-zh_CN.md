@@ -68,7 +68,7 @@ commit(router, entry.task, entry.location); // 像点击一样提交
 ## 功能
 
 - 框架无关：自带 `resolveView`，视图类型（`V`）由你决定——字符串、vdom 都可以
-- 基于 path-to-regexp 的路由匹配：声明序匹配、无 `path` 布局路由、`path: ''` 索引/兜底子路由、尾部斜杠敏感、区分大小写、嵌套参数深层覆盖浅层
+- 基于 path-to-regexp 的路由匹配：特异性排序（静态段 > 动态段 > splat，平分时声明顺序决胜）、无 `path` 布局路由、`path: ''` 索引/兜底子路由、尾部斜杠敏感、区分大小写、嵌套参数深层覆盖浅层
 - 路由守卫：每层路由支持静态 `redirect` 与异步 `beforeLoad`，按浅层到深层执行；连续重定向超过 10 次以 `RedirectLoopError` 拒绝
 - 可取消的异步导航：新的解析取代进行中的解析（`currentGuard`）；`cancel()` 主动中止；history POP 也会取消。被取代或被取消的 `navigate()` 返回的 promise **永远不会 settle**——不要 `await` 可能被取代的导航。取代/取消同时会 abort 该导航链的 `AbortSignal`：守卫（`beforeLoad` ctx）与视图加载器（`ResolveViewContext`）通过 `ctx.signal` 收到它，进行中的请求真正停止而非仅丢弃结果；`preload` 的解析因多方共享不会被 abort
 - 导航拦截器：`setBlocker(router, fn)` 注册同步的 `(to, from) => boolean` 否决谓词（入参为路径字符串），在每条 `navigate`/`commit`/`commitReplace` 链头与每个 history POP 落地前询问；被否决的导航不会启动，其 promise 立即 resolve（否决不是错误——与永不 settle 的被取消导航不同），被否决的 POP 以反向 `go()` 回退、且不影响进行中的导航——经典的未保存提醒守卫。`refresh` 与守卫重定向永不被阻塞
@@ -83,7 +83,7 @@ commit(router, entry.task, entry.location); // 像点击一样提交
 
 ## 匹配语义
 
-- 路由按**声明顺序**匹配，先匹配者优先——不按特异性排序。
+- 枚举全部匹配链，**最特异者胜**：按路径段计分，静态文本段 > 动态 `:param` 段 > splat `*wildcard` 段，每段累加进整条链的分数——段更多的链（钉住更多 URL 内容）胜过段少的链。平分时退回**声明顺序**决胜。父路由前缀命中但子路由全部不匹配时，不会遮蔽后续兄弟路由——例如 `[{path: '/a', children: [{path: '/b'}]}, {path: '/*rest'}]` 中 `/a/q` 由通配路由接住。
 - **没有 `path`** 的路由是布局路由：匹配空前缀，子路由对完整剩余路径继续匹配。
 - 叶子子路由声明 **`path: ''`** 时匹配父路由之下的任意剩余路径。声明在具体兄弟之后时，它充当父路由的索引路由（并兜底父路径下未匹配的路径）。
 - **尾部斜杠敏感**：`/users/` 不会匹配 `/users`。

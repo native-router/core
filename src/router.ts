@@ -1,5 +1,6 @@
 import {createPath, History, parsePath} from 'history';
 import {match as createMatcher} from 'path-to-regexp';
+import type {MatchFunction} from 'path-to-regexp';
 import type {
   Awaitable,
   Location,
@@ -308,7 +309,90 @@ export function reusableEntry<R extends BaseRoute = BaseRoute, V = any>(
 }
 
 /**
+ * Compiled matcher per route object, weakly held. Every compile option
+ * is a constant of the route itself — `end` is `!route.children`, the
+ * decode option never varies — so a route table is compiled exactly
+ * once however often {@link match} runs over it.
+ */
+const matcherCache = new WeakMap<
+  BaseRoute,
+  MatchFunction<Record<string, string>>
+>();
+
+function matcherOf<R extends BaseRoute>(route: R) {
+  if (!route.path) return undefined;
+  let matcher = matcherCache.get(route);
+  if (!matcher) {
+    matcher = createMatcher<Record<string, string>>(route.path, {
+      trailing: false,
+      sensitive: true,
+      decode:
+        typeof decodeURIComponent === 'function'
+          ? decodeURIComponent
+          : undefined,
+      end: !route.children
+    });
+    matcherCache.set(route, matcher);
+  }
+  return matcher;
+}
+
+/** Specificity weights of a path segment: static text > `:param` > `*splat`. */
+const SEGMENT_SCORE = {static: 10, dynamic: 3, splat: 2} as const;
+
+/**
+ * Score one path segment. `\\`-escaped characters are static text; the
+ * first unescaped `:`/`*` classifies a mixed segment(`page-:id`) by its
+ * dynamic part — one segment carries exactly one kind of parameter.
+ */
+function segmentScore(segment: string): number {
+  let kind: number = SEGMENT_SCORE.static;
+  let i = 0;
+  while (i < segment.length) {
+    const ch = segment[i];
+    if (ch === '\\') {
+      // The escaped character is static text, skip it.
+      i += 2;
+    } else if (ch === ':') {
+      kind = SEGMENT_SCORE.dynamic;
+      break;
+    } else if (ch === '*') {
+      kind = SEGMENT_SCORE.splat;
+      break;
+    } else {
+      i++;
+    }
+  }
+  return kind;
+}
+
+/**
+ * Specificity score of a matched chain: segment scores add up over the
+ * whole chain, so more segments(more of the URL pinned down) rank
+ * higher than fewer.
+ */
+function chainScore(chain: Matched<BaseRoute>[]): number {
+  let score = 0;
+  chain.forEach(({route}) => {
+    const path = typeof route.path === 'string' ? route.path : '';
+    path.split('/').forEach((segment) => {
+      if (segment) score += segmentScore(segment);
+    });
+  });
+  return score;
+}
+
+/**
  * Match a path.
+ *
+ * Every matching chain is collected, then the most specific one wins:
+ * per segment static text outranks a dynamic `:param`, which outranks a
+ * splat `*wildcard`, and longer chains(whose segments each contribute)
+ * outrank shorter ones. Equally specific chains fall back to
+ * declaration order. Collecting all chains also fixes sibling
+ * short-circuiting: a parent whose prefix matched but whose children
+ * all failed no longer hides later siblings.
+ *
  * @group Methods
  * @category Router
  * @param router router instance
@@ -321,49 +405,55 @@ export function match<R extends BaseRoute = BaseRoute>(
 ) {
   function matchRoutes(
     routes: R[],
-    baseUrl: string,
     // eslint-disable-next-line @typescript-eslint/no-shadow
     pathname: string
-  ): Matched<R>[] | undefined {
+  ): Matched<R>[][] {
+    const chains: Matched<R>[][] = [];
     for (let i = 0; i < routes.length; i++) {
       const route = routes[i];
-      const end = !route.children;
-      const matched = route.path
-        ? createMatcher<Record<string, string>>(route.path, {
-            trailing: false,
-            sensitive: true,
-            decode:
-              typeof decodeURIComponent === 'function'
-                ? decodeURIComponent
-                : undefined,
-            end
-          })(pathname)
+      const matcher = matcherOf(route);
+      const matched = matcher
+        ? matcher(pathname)
         : {
             path: '',
             index: 0,
             params: {}
           };
-
       if (matched) {
         const result = {route, ...matched};
-        if (end) return [result];
-        const children = matchRoutes(
-          route.children!,
-          `${baseUrl}${route.path || ''}`,
-          pathname.slice(matched.path.length)
-        );
-        if (children) return [result, ...children];
-        return undefined;
+        if (route.children) {
+          const childChains = matchRoutes(
+            route.children,
+            pathname.slice(matched.path.length)
+          );
+          for (let j = 0; j < childChains.length; j++) {
+            chains.push([result, ...childChains[j]]);
+          }
+        } else {
+          chains.push([result]);
+        }
       }
     }
-    return undefined;
+    return chains;
   }
 
-  return matchRoutes(
+  const chains = matchRoutes(
     router.routes,
-    router.baseUrl,
     pathname.slice(router.baseUrl.length)
   );
+  // Max-scan instead of sort: strictly-greater replaces, so equal
+  // scores keep the DFS enumeration order — declaration order — as the
+  // tiebreaker without relying on sort stability.
+  let best: Matched<R>[] | undefined;
+  let bestScore = -Infinity;
+  for (let i = 0; i < chains.length; i++) {
+    const score = chainScore(chains[i]);
+    if (score > bestScore) {
+      best = chains[i];
+      bestScore = score;
+    }
+  }
+  return best;
 }
 
 /**

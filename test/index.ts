@@ -64,6 +64,100 @@ describe('Router', () => {
       matched![1].path.should.equal('/bar');
     });
 
+    it('should fall back to later siblings when a parent prefix matched but no child did', () => {
+      const history = createMemoryHistory();
+      const router = create(
+        {
+          path: '',
+          children: [{path: '/a', children: [{path: '/b'}]}, {path: '/*rest'}]
+        },
+        history,
+        () => Promise.resolve(null)
+      );
+      // `/a` matches the first sibling's prefix but `/b` does not match
+      // `/a/q` — the wildcard sibling must still take it instead of 404.
+      const matched = match(router, '/a/q');
+      matched!.length.should.equal(2);
+      matched![1].path.should.equal('/a/q');
+      ({...matched![1].params}).should.deepEqual({rest: ['a', 'q']});
+    });
+
+    it('should rank a more specific chain over an earlier-declared broader one', () => {
+      const history = createMemoryHistory();
+      const router = create(
+        {
+          path: '',
+          children: [{path: '/*rest'}, {path: '/a', children: [{path: '/b'}]}]
+        },
+        history,
+        () => Promise.resolve(null)
+      );
+      // Both chains match `/a/b`; the static one wins although the
+      // wildcard is declared first.
+      const matched = match(router, '/a/b');
+      matched!.length.should.equal(3);
+      matched![1].route.path.should.equal('/a');
+      matched![1].path.should.equal('/a');
+      matched![2].path.should.equal('/b');
+    });
+
+    it('should rank static over dynamic segments regardless of declaration order', () => {
+      const history = createMemoryHistory();
+      const router = create(
+        {
+          path: '',
+          children: [{path: '/users/:id'}, {path: '/users/new'}]
+        },
+        history,
+        () => Promise.resolve(null)
+      );
+      match(router, '/users/new')![1].route.path.should.equal('/users/new');
+      match(router, '/users/42')![1].route.path.should.equal('/users/:id');
+    });
+
+    it('should rank deeper static chains over shallower dynamic ones', () => {
+      const history = createMemoryHistory();
+      const router = create(
+        {
+          path: '',
+          children: [{path: '/posts/:author/:slug'}, {path: '/posts/archive'}]
+        },
+        history,
+        () => Promise.resolve(null)
+      );
+      // 3 static segments (30) beat 1 static + 2 dynamic (16).
+      match(router, '/posts/archive')![1].route.path.should.equal(
+        '/posts/archive'
+      );
+      match(router, '/posts/alice/intro')![1].route.path.should.equal(
+        '/posts/:author/:slug'
+      );
+    });
+
+    it('should keep declaration order for equally specific chains', () => {
+      const history = createMemoryHistory();
+      const router = create(
+        {path: '', children: [{path: '/:x'}, {path: '/:y'}]},
+        history,
+        () => Promise.resolve(null)
+      );
+      match(router, '/q')![1].route.path.should.equal('/:x');
+    });
+
+    it('should keep matching results stable across repeated calls', () => {
+      const history = createMemoryHistory();
+      const router = create(
+        {path: '', children: [{path: '/users/:id'}, {path: '/users/new'}]},
+        history,
+        () => Promise.resolve(null)
+      );
+      const first = match(router, '/users/new');
+      const second = match(router, '/users/new');
+      second!.length.should.equal(first!.length);
+      second![1].route.should.equal(first![1].route);
+      ({...second![1].params}).should.deepEqual({...first![1].params});
+    });
+
     // ExtractPathParams 按 path-to-regexp 8.4.2 字符串语法建模
     it('should model path params of the path-to-regexp 8.4.2 grammar', () => {
       // :name 与段内前缀/后缀静态文本、多参数

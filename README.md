@@ -68,7 +68,7 @@ commit(router, entry.task, entry.location); // commit like a click
 ## Features
 
 - Framework-agnostic: bring your own `resolveView`, the view type (`V`) is yours — a string, a vdom, anything
-- Route matching via path-to-regexp: declaration order, layout routes without `path`, index/fallback children with `path: ''`, strict trailing slashes, case-sensitive, nested params merged deep over shallow
+- Route matching via path-to-regexp: specificity ranking (static > dynamic > splat segments, declaration order breaks ties), layout routes without `path`, index/fallback children with `path: ''`, strict trailing slashes, case-sensitive, nested params merged deep over shallow
 - Route guards: static `redirect` and async `beforeLoad` on every route level, run shallow → deep; more than 10 chained redirects reject with `RedirectLoopError`
 - Cancelable async navigation: a new resolve supersedes the in-flight one (`currentGuard`); `cancel()` aborts it; a history POP cancels it too. A superseded or cancelled `navigate()` promise **never settles** — don't `await` a navigation that might be superseded. Superseding or cancelling also aborts the chain's `AbortSignal`: guards (`beforeLoad` ctx) and view loaders (`ResolveViewContext`) receive it as `ctx.signal`, so their in-flight requests stop instead of only having results dropped; `preload` resolutions are shared and therefore never aborted
 - Navigation blockers: `setBlocker(router, fn)` registers a synchronous `(to, from) => boolean` veto over path strings, asked at the head of every `navigate`/`commit`/`commitReplace` and before a history POP lands; a vetoed navigation never starts and its promise resolves immediately (a veto is not an error — unlike a cancelled navigation, whose promise never settles), a vetoed POP is rewound with a counter-`go()` that leaves any in-flight navigation running — the classic unsaved-changes guard. `refresh` and guard redirects are never blocked
@@ -83,7 +83,7 @@ commit(router, entry.task, entry.location); // commit like a click
 
 ## Matching semantics
 
-- Routes match in **declaration order** and the first match wins — there is no sorting by specificity.
+- Every matching chain is collected and the **most specific one wins**: per path segment, static text outranks a dynamic `:param`, which outranks a splat `*wildcard`, and every segment adds to the chain's score — so longer chains (more of the URL pinned down) outrank shorter ones. Equally specific chains fall back to **declaration order**. A parent whose prefix matched but whose children all failed never hides later siblings — e.g. `[{path: '/a', children: [{path: '/b'}]}, {path: '/*rest'}]` serves `/a/q` from the wildcard.
 - A route **without `path`** is a layout: it matches the empty prefix and its children are matched against the full remaining path.
 - A leaf child with **`path: ''`** matches whatever is left under its parent. Declared after its concrete siblings it serves as the parent's index route (and as the fallback for paths unmatched under the parent).
 - **Trailing slashes are significant**: `/users/` does not match `/users`.
