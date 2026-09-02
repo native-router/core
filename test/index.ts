@@ -294,6 +294,147 @@ describe('Router', () => {
       await navigate(b, '/a');
       seen.should.deepEqual(['a:a', 'b:b']);
     });
+
+    describe('route context', () => {
+      it('should merge a route context over the instance context, route wins', async () => {
+        const guards: unknown[] = [];
+        const history = createMemoryHistory({initialEntries: ['/']});
+        const router = create(
+          {
+            path: '',
+            children: [
+              {
+                path: '/a',
+                context: {theme: 'dark', api: 'route'},
+                beforeLoad: ({context}) => {
+                  guards.push(context);
+                }
+              }
+            ]
+          },
+          history,
+          () => Promise.resolve(null),
+          {context: {theme: 'light', api: 'instance', locale: 'en'}}
+        );
+
+        await navigate(router, '/a');
+        guards.should.deepEqual([{theme: 'dark', api: 'route', locale: 'en'}]);
+      });
+
+      it('should inherit ancestor route contexts in deeper guards, deeper wins on conflicts', async () => {
+        const guards: unknown[] = [];
+        const history = createMemoryHistory({initialEntries: ['/']});
+        const router = create(
+          {
+            path: '',
+            children: [
+              {
+                path: '/admin',
+                context: {role: 'admin', audit: true},
+                children: [
+                  {
+                    path: '/users',
+                    context: {section: 'users', audit: false},
+                    children: [
+                      {
+                        path: '/:id',
+                        context: {pane: 'detail'},
+                        beforeLoad: ({context}) => {
+                          guards.push(context);
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          history,
+          () => Promise.resolve(null)
+        );
+
+        await navigate(router, '/admin/users/7');
+        // Three levels of declarations merge without conflict; the
+        // deeper level overrides the same key(audit) — params and
+        // contexts accumulate the same way.
+        guards.should.deepEqual([
+          {role: 'admin', audit: false, section: 'users', pane: 'detail'}
+        ]);
+      });
+
+      it('should hand resolveView the full-chain fold through every level', async () => {
+        const seen: {view?: unknown; oneShot?: unknown} = {};
+        const routes = {
+          path: '',
+          context: {root: true},
+          children: [
+            {
+              path: '/a',
+              context: {level: 'a'},
+              children: [{path: '/leaf', context: {level: 'leaf'}}]
+            }
+          ]
+        };
+        const makeView =
+          (key: 'view' | 'oneShot') =>
+          (matched: any[], {context}: {context: unknown}) => {
+            seen[key] = context;
+            return Promise.resolve(null);
+          };
+        const history = createMemoryHistory({initialEntries: ['/']});
+        const router = create(routes, history, makeView('view'));
+        await navigate(router, '/a/leaf');
+        (seen.view as object).should.deepEqual({root: true, level: 'leaf'});
+
+        // The one-shot resolve(initHistoryStack warm-up path) folds the
+        // same way.
+        await resolveTo(
+          create(routes, history, makeView('oneShot')),
+          '/a/leaf'
+        );
+        (seen.oneShot as object).should.deepEqual({
+          root: true,
+          level: 'leaf'
+        });
+      });
+
+      it('should keep the exact instance context when no level declares one', async () => {
+        const seen: {guard?: unknown; view?: unknown} = {};
+        const instanceContext = {api: 'instance'};
+        const history = createMemoryHistory({initialEntries: ['/']});
+        const router = create(
+          {
+            path: '',
+            children: [
+              {
+                path: '/a',
+                context: null,
+                children: [
+                  {
+                    path: '/b',
+                    beforeLoad: ({context}) => {
+                      seen.guard = context;
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          history,
+          (matched, {context}) => {
+            seen.view = context;
+            return Promise.resolve(null);
+          },
+          {context: instanceContext}
+        );
+
+        await navigate(router, '/a/b');
+        // A null declaration contributes nothing: the guards and the
+        // view see the very instance object, not a copy.
+        (seen.guard === instanceContext).should.be.true();
+        (seen.view === instanceContext).should.be.true();
+      });
+    });
   });
 
   describe('navigate', () => {

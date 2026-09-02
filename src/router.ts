@@ -10,6 +10,7 @@ import type {
   BaseRoute,
   RouterInstance,
   ResolveView,
+  ResolveViewContext,
   HistoryState,
   SearchInput
 } from './types';
@@ -360,6 +361,38 @@ function matcherOf<R extends BaseRoute>(route: R) {
   return matcher;
 }
 
+/**
+ * Fold a level's {@link BaseRoute.context route context} over the
+ * context its ancestors produced(the route wins on key conflicts). A
+ * level without `context` — or a `null`/`undefined` one — contributes
+ * nothing, so tables that never declare route contexts keep the exact
+ * instance-context value they always had. The merge is a shallow spread
+ * of plain objects, mirroring how the runtime merges matched params
+ * level by level.
+ */
+function mergeRouteContext(base: unknown, route: BaseRoute) {
+  const routeContext = route.context;
+  if (routeContext == null) return base;
+  return base == null
+    ? {...(routeContext as object)}
+    : {...(base as object), ...(routeContext as object)};
+}
+
+/**
+ * The context the view resolution of a whole matched chain receives:
+ * the instance context folded through every level's route context.
+ */
+function chainContext(
+  router: RouterInstance<any>,
+  matched: Matched<BaseRoute>[]
+) {
+  let {context} = router;
+  for (let i = 0; i < matched.length; i++) {
+    context = mergeRouteContext(context, matched[i].route);
+  }
+  return context;
+}
+
 /** Specificity weights of a path segment: static text > `:param` > `*splat`. */
 const SEGMENT_SCORE = {static: 10, dynamic: 3, splat: 2} as const;
 
@@ -525,7 +558,15 @@ export function resolve<R extends BaseRoute = BaseRoute, V = any>(
           // One-shot resolves(warm-up, direct calls) are never superseded
           // or cancelled: their loaders get a signal that never aborts.
           signal: new AbortController().signal,
-          context: router.context
+          // The instance context folded through every matched level's
+          // route context, the same value a guarded resolve hands the
+          // view chain. Cast back through the loose `any` the resolve
+          // signature(unguarded by the instance's C) always handed
+          // over.
+          context: chainContext(
+            router,
+            matched
+          ) as ResolveViewContext<R>['context']
         })
       : Promise.reject(new NotFoundError(location.pathname))
   ).catch(errorHandler);
@@ -618,9 +659,16 @@ export async function resolveEntry<R extends BaseRoute = BaseRoute, V = any>(
     // upgrades them to the schema output before its guard runs, so
     // guards of deeper levels see coerced params of the whole prefix.
     let params: Record<string, string> = {};
+    // The instance context folded through the prefix's route contexts:
+    // a level's guard sees its ancestors' declarations plus its own —
+    // the guard-side twin of the params accumulation above. Loosely
+    // typed(the instance's own C is not threaded through this generic)
+    // exactly like the instance context handed over today.
+    let {context} = router;
     for (let i = 0; i < matched.length; i++) {
       const {route} = matched[i];
       params = {...params, ...matched[i].params};
+      context = mergeRouteContext(context, route);
       // The level's params schema runs before its guard, so the guard
       // sees the coerced output. A redirect level never runs its guard,
       // so its schema is skipped — the same asymmetry the level's
@@ -677,7 +725,7 @@ export async function resolveEntry<R extends BaseRoute = BaseRoute, V = any>(
           params,
           signal,
           search,
-          context: router.context
+          context
         });
       }
       if (target) {
@@ -695,7 +743,10 @@ export async function resolveEntry<R extends BaseRoute = BaseRoute, V = any>(
         router,
         location,
         signal,
-        context: router.context
+        // The full-chain fold: every matched level's route context over
+        // the instance context. Frameworks re-derive the per-level
+        // prefix for their data loaders(see `@native-router/react`).
+        context
       }).catch(errorHandler)
     };
   }

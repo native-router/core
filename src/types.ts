@@ -404,6 +404,24 @@ export type BaseRoute<T = any> = {
    */
   params?: StandardSchemaV1;
   /**
+   * Route-local context: a plain object merged OVER the router's
+   * {@link Options.context instance context} for this level and every
+   * deeper level of its chain(route wins on key conflicts). `beforeLoad`
+   * guards receive the merge accumulated through their own level as
+   * their {@link GuardContext.context ctx.context}, and `resolveView`
+   * implementations receive the merge over the whole matched chain as
+   * their {@link ResolveViewContext.context ctx.context} — frameworks
+   * forward the per-level prefix to their data loaders.
+   *
+   * Levels without `context`(or with `null`/`undefined`) contribute
+   * nothing, so tables that never declare route contexts keep the exact
+   * instance-context value they always had — the field is purely
+   * additive. The merge is a shallow spread at resolve time: it is not
+   * reactive, and mutating the declared object later does not re-resolve
+   * anything.
+   */
+  context?: unknown;
+  /**
    * Route guard invoked before the view resolves. Return a path string
    * to redirect, or nothing(`undefined`) to continue. The guard's
    * {@link GuardContext context} carries the level's parsed
