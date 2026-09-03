@@ -44,6 +44,7 @@ import {
 } from '../src/search';
 import {
   NativeRouterError,
+  NavigationCancelledError,
   NotFoundError,
   ParamsError,
   RedirectLoopError,
@@ -517,9 +518,20 @@ describe('Router', () => {
         }
       );
 
-      // The parked chain of /a is superseded by /b.
-      navigate(router, '/a').catch(() => undefined);
+      // The parked chain of /a is superseded by /b: it rejects with the
+      // typed cancellation error, eagerly — its guard never settles.
+      let superseded: any;
+      navigate(router, '/a').then(
+        () => {
+          superseded = 'fulfilled';
+        },
+        (e) => {
+          superseded = e;
+        }
+      );
       await navigate(router, '/b');
+      Should(superseded).be.an.instanceOf(NavigationCancelledError);
+      superseded.to.should.equal('/a');
 
       const byName = (name: string) => signals.find(([n]) => n === name)![1];
       // Aborting is synchronous with the superseding navigation.
@@ -779,29 +791,26 @@ describe('Router', () => {
       const viewsBefore = [...views];
       viewsBefore.at(-1)!.should.equal('view:/');
 
-      let settled = false;
+      let settled: any;
       const inflight = navigate(router, '/slow').then(
         () => {
-          settled = true;
+          settled = 'fulfilled';
         },
-        () => {
-          settled = true;
+        (e) => {
+          settled = e;
         }
       );
       (router.resolving !== undefined).should.be.true();
 
       cancel(router);
 
-      // The cancelled chain's promise never settles: race it against a
-      // short timer a few times to prove neither fulfillment nor
-      // rejection fires.
-      for (let i = 0; i < 3; i++) {
-        // eslint-disable-next-line no-await-in-loop -- each round must observe the timer's non-settlement before the next
-        await Promise.race([inflight, tick()]);
-        settled.should.be.false();
-        // eslint-disable-next-line no-await-in-loop -- settle the timer before the next observation round
-        await tick();
-      }
+      // The cancelled chain rejects eagerly with a typed error — the
+      // guard above never settles at all, yet the awaiter does not hang.
+      await inflight;
+      Should(settled).be.an.instanceOf(NavigationCancelledError);
+      Should(settled).be.an.instanceOf(NativeRouterError);
+      // The rejection carries the discarded target, committed path form.
+      settled.to.should.equal('/slow');
 
       // The in-flight mark is gone and the guard's signal was aborted
       // synchronously with cancel().
@@ -844,7 +853,8 @@ describe('Router', () => {
         {onLoadingChange: (status) => statuses.push(status)}
       );
 
-      // The cancelled chain parks forever; its in-flight mark must go.
+      // The cancelled chain's promise already rejected; its in-flight
+      // mark must go too.
       navigate(router, '/guarded').catch(() => undefined);
       statuses.should.deepEqual(['pending']);
       cancel(router);
@@ -2214,8 +2224,8 @@ describe('Router', () => {
         return false;
       });
 
-      // A vetoed navigate resolves immediately — not an error, and
-      // unlike a cancelled navigation it does settle.
+      // A vetoed navigate resolves immediately — a veto is the user
+      // saying no, a normal outcome; a cancelled navigation rejects.
       await navigate(router, '/b?x=1#top');
       asks.should.deepEqual([['/b?x=1#top', '/a']]);
       history.location.pathname.should.equal('/a');

@@ -20,6 +20,26 @@ export class RedirectLoopError extends NativeRouterError {
 }
 
 /**
+ * Rejected when a navigation dies by replacement instead of failure: a
+ * newer navigation superseded it, or `cancel()` discarded it (a history
+ * POP cancels the in-flight chain the same way). The chain's guards and
+ * loaders were aborted through their `signal`, and its result — even a
+ * late-settling one — is dropped. Awaiters observe this rejection so a
+ * discarded navigation never hangs its caller; a vetoed navigation
+ * (blocker) instead resolves normally, since a veto is a user decision,
+ * not a failure.
+ */
+export class NavigationCancelledError extends NativeRouterError {
+  /** The discarded navigation's target, in committed path form. */
+  readonly to: string;
+
+  constructor(to: string) {
+    super(`Navigation to "${to}" was cancelled or superseded`);
+    this.to = to;
+  }
+}
+
+/**
  * Thrown when a route {@link BaseRoute.search search schema} rejects the
  * location search. Issues are formatted as `path: message` pairs joined
  * with `; `, e.g.

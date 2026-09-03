@@ -70,15 +70,15 @@ commit(router, entry.task, entry.location); // 像点击一样提交
 - 框架无关：自带 `resolveView`，视图类型（`V`）由你决定——字符串、vdom 都可以
 - 基于 path-to-regexp 的路由匹配：特异性排序（静态段 > 动态段 > splat，平分时声明顺序决胜）、无 `path` 布局路由、`path: ''` 索引/兜底子路由、尾部斜杠敏感、区分大小写、嵌套参数深层覆盖浅层
 - 路由守卫：每层路由支持静态 `redirect` 与异步 `beforeLoad`，按浅层到深层执行；连续重定向超过 10 次以 `RedirectLoopError` 拒绝
-- 可取消的异步导航：新的解析取代进行中的解析（`currentGuard`）；`cancel()` 主动中止；history POP 也会取消。被取代或被取消的 `navigate()` 返回的 promise **永远不会 settle**——不要 `await` 可能被取代的导航。取代/取消同时会 abort 该导航链的 `AbortSignal`：守卫（`beforeLoad` ctx）与视图加载器（`ResolveViewContext`）通过 `ctx.signal` 收到它，进行中的请求真正停止而非仅丢弃结果；`preload` 的解析运行在自己的 signal 之下，只有并发上限会将其 abort
-- 导航拦截器：`setBlocker(router, fn)` 注册同步的 `(to, from) => boolean` 否决谓词（入参为路径字符串），在每条 `navigate`/`commit`/`commitReplace` 链头与每个 history POP 落地前询问；被否决的导航不会启动，其 promise 立即 resolve（否决不是错误——与永不 settle 的被取消导航不同），被否决的 POP 以反向 `go()` 回退、且不影响进行中的导航——经典的未保存提醒守卫。`refresh` 与守卫重定向永不被阻塞
+- 可取消的异步导航：新的解析取代进行中的解析（`currentGuard`）；`cancel()` 主动中止；history POP 也会取消。被取代或被取消的 `navigate()` 返回的 promise 会以 `NavigationCancelledError` reject——主动且即时，不等被中止的解析自行 settle，`await` 不会悬挂在被丢弃的导航上（被否决的导航正常 resolve：否决是用户的正常决定，不是失败）。即发即忘的调用点挂一个 no-op catch 即可（react 绑定的 `Link` 与各 setter 即如此）。取代/取消同时会 abort 该导航链的 `AbortSignal`：守卫（`beforeLoad` ctx）与视图加载器（`ResolveViewContext`）通过 `ctx.signal` 收到它，进行中的请求真正停止而非仅丢弃结果；`preload` 的解析运行在自己的 signal 之下，只有并发上限会将其 abort
+- 导航拦截器：`setBlocker(router, fn)` 注册同步的 `(to, from) => boolean` 否决谓词（入参为路径字符串），在每条 `navigate`/`commit`/`commitReplace` 链头与每个 history POP 落地前询问；被否决的导航不会启动，其 promise 立即 resolve（否决是用户的正常决定——不是错误——而被取消的导航以 `NavigationCancelledError` reject），被否决的 POP 以反向 `go()` 回退、且不影响进行中的导航——经典的未保存提醒守卫。`refresh` 与守卫重定向永不被阻塞
 - 导航 API：`navigate`、`refresh`、`go`/`forward`/`back`、`commit`/`commitReplace`、`createHref`、`getParams`、`match`、`toLocation`、`resolve`、`resolveTo`
 - `invalidate(router)`：一次性丢弃会话视图快照——当前视图保持渲染（不重解析、不重渲染），下一次前进/后退经守卫重新解析；典型调用点是登出/切换账号之后，防止 POP 回退渲染上一账号数据或绕过会话内已执行过的守卫
 - 基于 [Standard Schema](https://standardschema.dev) 的 search 校验：任意路由层可声明 `search` 校验器（zod/valibot/arktype，无硬依赖），用 `parseSearch`/`parseSearchSync` 解析；失败抛出 `SearchError`
 - 基于 `searchDeps` 的 search 精细失效：在每层声明本层解析消费的 search 键（`[]` = 完全不消费，函数形式自行推导投影），同路径导航若每层投影不变，直接复用当前视图快照——零守卫、零 loader、零懒加载，与 POP 命中 `viewStack` 完全一致；未声明的层保持「每次导航重解析」的现状（逐字节一致）；`reusableEntry` 导出该判定，供框架 setter 以同一语义提交 search 写入
 - `preload(router, to, {ttl})`：提前经守卫解析目标，并发调用共享同一任务（in-flight 去重）并带 TTL（默认 30 秒）；commit 消费后即失效。预取有界且可取消：每次预取运行在自己的 `AbortSignal` 下（经 `ctx.signal` 交给守卫与加载器），在飞数量超出 `preloadConcurrency`（默认 4，`create` 选项）时最旧者按 FIFO 被 abort——缓存槽位随之丢弃、失败按后台语义吞掉；被导航消费的预取绝不会被上限中止
 - `errorHandler` 钩子把解析失败转换为兜底视图
-- 错误类型：`NativeRouterError`、`NotFoundError`、`RedirectLoopError`、`SearchError`
+- 错误类型：`NativeRouterError`、`NotFoundError`、`RedirectLoopError`、`SearchError`、`NavigationCancelledError`
 - Tree-Shaking 友好：`sideEffects: false`
 
 ## 匹配语义

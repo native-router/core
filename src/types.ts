@@ -543,7 +543,7 @@ export type RouterInstance<R extends BaseRoute, V = any, C = any> = {
    */
   locationStack: Location[];
   resolveView: ResolveView<R, V>;
-  currentGuard<T>(promise: Promise<T>): Promise<T>;
+  currentGuard<T>(promise: Promise<T>, discarded: () => Error): Promise<T>;
   cancelAll(): void;
   resolving?: Location;
   /**

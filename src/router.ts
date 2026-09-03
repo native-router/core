@@ -16,7 +16,11 @@ import type {
 } from './types';
 import {parseParams, parseSearch, parseSearchInput} from './search';
 import {createCurrentGuard, noop, reject} from './util';
-import {NotFoundError, RedirectLoopError} from './errors';
+import {
+  NavigationCancelledError,
+  NotFoundError,
+  RedirectLoopError
+} from './errors';
 
 const DEFAULT_MAX_STACK_DEPTH = 100;
 
@@ -1117,12 +1121,14 @@ function commitBase<R extends BaseRoute = BaseRoute, V = any>(
   return (
     // The whole chain — route guards AND the view task — is guarded from
     // the very start: a superseding navigation or a cancel() while slow
-    // guards are still running parks this chain forever, exactly like
-    // during the view phase.
+    // guards are still running rejects this chain's promise with a
+    // NavigationCancelledError, exactly like during the view phase —
+    // eagerly, without waiting for the superseded resolve to settle.
     currentGuard(
       entryPromise.then((entry) =>
         entry.task.then((resolvedView) => ({entry, resolvedView}))
-      )
+      ),
+      () => new NavigationCancelledError(createPath(location))
     )
       .then(({entry, resolvedView}) => {
         // This chain settled: it is no longer in flight. Clearing the
@@ -1130,8 +1136,8 @@ function commitBase<R extends BaseRoute = BaseRoute, V = any>(
         // history, which synchronously re-enters cancel() through the
         // router's own listen() handler — an already-settled chain must
         // not be aborted(or fire a cancel signal) as if it were still
-        // running. Superseded chains park forever, so the mark is always
-        // ours to clear.
+        // running. Only the current chain can reach here — superseded
+        // chains were rejected — so the mark is always ours to clear.
         router.resolving = undefined;
         onResolved(resolvedView, entry);
         // The navigation consumed this resolution: drop its preload
@@ -1142,6 +1148,13 @@ function commitBase<R extends BaseRoute = BaseRoute, V = any>(
         onLoadingChange('resolved');
       })
       .catch((e) => {
+        // A discarded chain rejects with NavigationCancelledError, but
+        // the in-flight mark and the loading signal belong to whoever
+        // discarded it — cancel() cleared the mark and fired
+        // onLoadingChange() itself, a superseding chain reset both for
+        // itself. Touching them here would clobber the winner's state;
+        // the rejection itself still propagates to the awaiter.
+        if (e instanceof NavigationCancelledError) throw e;
         router.resolving = undefined;
         onLoadingChange('rejected');
         throw e;
@@ -1156,10 +1169,14 @@ function commitBase<R extends BaseRoute = BaseRoute, V = any>(
  * setBlocker}) may veto the navigation before anything starts. The guard
  * phase is part of the
  * cancelable navigation: a superseding navigate or a `cancel()` while
- * guards are still running discards this navigation — and aborts the
- * chain's `signal`, so guards and loaders observing it({@link
+ * guards are still running discards this navigation — the returned
+ * promise rejects with a {@link NavigationCancelledError} — and aborts
+ * the chain's `signal`, so guards and loaders observing it({@link
  * GuardContext.signal}, {@link ResolveViewContext.signal}) stop their
- * requests instead of only having their results dropped.
+ * requests instead of only having their results dropped. A vetoed
+ * navigation instead resolves normally: a veto is the user saying no, a
+ * normal outcome; being discarded is a failure for the awaiter.
+ * Fire-and-forget call sites attach a no-op catch.
  *
  * Same-route search navigations take the {@link BaseRoute.searchDeps
  * searchDeps} fast path: when every level of the matched chain declares
@@ -1182,9 +1199,12 @@ export function navigate<R extends BaseRoute = BaseRoute, V = any>(
   const location = toLocation(router, to, state);
   // Blockers sit at the chain head, before the controller exists: a
   // vetoed navigation never resolves a single guard, and its promise
-  // resolves immediately — a veto is not an error, and unlike a
-  // cancelled navigation(whose promise never settles) it does settle —
-  // so the ubiquitous `void navigate(...)` call sites stay untouched.
+  // resolves immediately — a veto is the user saying no, a normal
+  // outcome, not an error. A cancelled/superseded navigation instead
+  // rejects with a NavigationCancelledError: it died by replacement,
+  // which is a failure for its awaiter. Fire-and-forget call sites that
+  // never await attach a no-op catch(the react bindings' Link and
+  // setters do) to keep the rejection out of the unhandled channel.
   // The target is asked in its committed path form(`createPath`), the
   // same string a POP blocker sees, baseUrl included.
   if (blockedBy(router, createPath(location))) return Promise.resolve();
@@ -1289,7 +1309,9 @@ export function createHref<R extends BaseRoute = BaseRoute, V = any>(
 
 /**
  * Cancel the current navigate. The in-flight chain's guards/loaders are
- * aborted through their signal, not merely discarded.
+ * aborted through their signal, not merely discarded, and the
+ * navigation's promise rejects with a {@link NavigationCancelledError}
+ * — eagerly, without waiting for the aborted resolve to settle.
  * @group Methods
  * @category Router
  * @param router router instance
@@ -1306,9 +1328,11 @@ export function cancel<R extends BaseRoute = BaseRoute, V = any>(
     core.resolvingController?.abort();
     core.resolvingController = undefined;
   }
-  // The cancelled chain parks forever, so nothing else will clear the
-  // in-flight mark: drop it here, or a later navigation would fire a
-  // spurious cancel signal(`onLoadingChange()`) for a dead resolve.
+  // The cancelled chain's promise was already rejected eagerly (its
+  // awaiter saw a NavigationCancelledError), and nothing else will
+  // clear the in-flight mark: drop it here, or a later navigation would
+  // fire a spurious cancel signal(`onLoadingChange()`) for a dead
+  // resolve.
   router.resolving = undefined;
   router.cancelAll();
   router.onLoadingChange?.();
@@ -1471,8 +1495,9 @@ function cancelPendingRewind(router: RouterInstance<any>) {
  * the registered blockers(in registration order, first veto wins)
  * before anything else; a vetoed navigation never starts — no guards,
  * no loaders, no history change — and its promise resolves immediately
- * (a veto is not an error; unlike a cancelled navigation, whose promise
- * never settles, a vetoed one does). `refresh` and guard redirects
+ * (a veto is the user saying no, a normal outcome, not an error; a
+ * cancelled or superseded navigation instead rejects with a
+ * NavigationCancelledError). `refresh` and guard redirects
  * are never blocked: a refresh re-resolves the current location, and a
  * redirect is the guard chain's own target correction, already asked
  * once at the chain head. A vetoed POP is rewound with a
