@@ -1420,6 +1420,91 @@ describe('Router', () => {
       resolveView.callCount.should.equal(6);
     });
 
+    it('should bound the warm-up fan-out and queue the rest FIFO in stack order', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const paths = ['/a', '/b', '/c', '/d', '/e', '/f', '/g', '/h'];
+      let active = 0;
+      let maxActive = 0;
+      const started: string[] = [];
+      const gates: Array<() => void> = [];
+      const resolveView = (matched: any[]) => {
+        active++;
+        maxActive = Math.max(maxActive, active);
+        const view = `view:${matched.at(-1)!.path}`;
+        started.push(view);
+        return new Promise((done) => {
+          // One-shot: the drain loop may re-open an already-released
+          // gate(splice is positional), a second decrement would skew
+          // the in-flight count.
+          let opened = false;
+          gates.push(() => {
+            if (opened) return;
+            opened = true;
+            active--;
+            done(view);
+          });
+        });
+      };
+      const router = create(
+        {path: '', children: paths.map((p) => ({path: p}))},
+        history,
+        resolveView
+      );
+      router.locationStack = paths.map((p) => toLocation(router, p));
+
+      const warmed = initHistoryStack(router);
+      // Only the bound's worth of entries resolve at once — a refresh
+      // never fans the whole window's loaders out simultaneously.
+      await tick();
+      started.should.deepEqual(['view:/a', 'view:/b', 'view:/c', 'view:/d']);
+      maxActive.should.equal(4);
+
+      // Completing the head admits the next queued entry, FIFO.
+      gates[0]();
+      await tick();
+      started.should.deepEqual([
+        'view:/a',
+        'view:/b',
+        'view:/c',
+        'view:/d',
+        'view:/e'
+      ]);
+
+      // Draining everything settles the warm-up with every slot warmed.
+      // Admitted entries push their own gates, so keep releasing until
+      // the queue is empty.
+      for (;;) {
+        gates.splice(0).forEach((open) => open());
+        // eslint-disable-next-line no-await-in-loop -- the drain is inherently sequential: each round releases the gates the previous round's admissions pushed
+        await tick();
+        if (!gates.length && !active) break;
+      }
+      await warmed;
+      started.length.should.equal(paths.length);
+      router.viewStack.should.deepEqual(paths.map((p) => `view:${p}`));
+      maxActive.should.equal(4);
+    });
+
+    it('should not fail the whole warm-up when a single entry fails', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const paths = ['/a', '/bad', '/c'];
+      const resolveView = (matched: any[]) =>
+        matched.at(-1)!.path === '/bad'
+          ? Promise.reject(new Error('boom'))
+          : Promise.resolve(`view:${matched.at(-1)!.path}`);
+      const router = create(
+        {path: '', children: paths.map((p) => ({path: p}))},
+        history,
+        resolveView
+      );
+      router.locationStack = paths.map((p) => toLocation(router, p));
+
+      await initHistoryStack(router);
+      // The failed slot degrades to an unwarmed entry(the POP lazy
+      // refresh re-resolves it on landing); its neighbours are warm.
+      router.viewStack.should.deepEqual(['view:/a', null, 'view:/c']);
+    });
+
     it('should restore the serialized window after a refresh and warm it up for zero-request navigation', async () => {
       const history1 = createMemoryHistory({initialEntries: ['/foo']});
       const router1 = create(

@@ -1315,12 +1315,31 @@ export function cancel<R extends BaseRoute = BaseRoute, V = any>(
 }
 
 /**
+ * Default bound of concurrently in-flight {@link initHistoryStack}
+ * warm-up resolutions. Refreshing a full window(≤ maxStackDepth, 100 by
+ * default) would otherwise fan every entry's guards/loaders out at once
+ * and saturate the network exactly when the page is already busy
+ * reloading — the same reason {@link preload} is bounded. Entries simply
+ * queue(FIFO by stack order) instead of being aborted: a warm-up has no
+ * winner to prioritize, every entry is wanted eventually.
+ */
+const DEFAULT_INIT_CONCURRENCY = 4;
+
+/**
  * Restore/warm up the view stack by re-resolving every reachable entry
  * of the in-memory location stack. Call it after a refresh: in-window
  * back/forward then switch views without new resolves.
  *
+ * Warm-up resolutions are bounded(see {@link
+ * DEFAULT_INIT_CONCURRENCY}): at most 4 entries resolve at once, the
+ * rest queue FIFO in stack order. A single entry that fails(its
+ * `errorHandler` may re-reject) leaves its slot empty — the lazy
+ * re-resolve path of {@link listen} picks it up again if the user
+ * actually lands on it — and never fails the whole warm-up.
+ *
  * 恢复/预热内存栈中的可达条目（窗口内有 location 的槽位），刷新后调用
- * 可让窗口内前进/后退零请求。
+ * 可让窗口内前进/后退零请求。并发上限 4，单条失败不整体中断，失败槽位
+ * 留空待惰性重解析。
  * @group Methods
  * @category Router
  * @param router router instance
@@ -1328,10 +1347,42 @@ export function cancel<R extends BaseRoute = BaseRoute, V = any>(
 export function initHistoryStack<R extends BaseRoute = BaseRoute, V = any>(
   router: RouterInstance<R, V>
 ) {
-  return Promise.all(
-    router.locationStack.map((location) => resolve<R, V>(router, location))
-  ).then((views) => {
-    router.viewStack = views;
+  const {locationStack} = router;
+  const views: (V | null)[] = new Array(locationStack.length).fill(null);
+  let cursor = 0;
+  let active = 0;
+  return new Promise<void>((done) => {
+    const pump = () => {
+      const warm = (slot: number) => {
+        active++;
+        resolve<R, V>(router, locationStack[slot])
+          .then(
+            (view) => {
+              views[slot] = view;
+            },
+            // A failed entry degrades to an unwarmed slot(null) — the POP
+            // lazy-refresh path re-resolves it on landing — instead of
+            // failing the whole warm-up.
+            () => {}
+          )
+          .then(() => {
+            active--;
+            pump();
+          });
+      };
+      while (
+        active < DEFAULT_INIT_CONCURRENCY &&
+        cursor < locationStack.length
+      ) {
+        warm(cursor++);
+      }
+      if (active === 0 && cursor >= locationStack.length) done();
+    };
+    pump();
+  }).then(() => {
+    // Unwarmed slots hold `null`, the same hole value invalidate()
+    // writes; the stack type stays V[] for unchanged public surface.
+    router.viewStack = views as V[];
   });
 }
 
