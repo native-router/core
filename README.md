@@ -243,7 +243,32 @@ router.context; // {api: myApi} — typed from the option
 - The value's type is inferred from the option and flows into `RouterInstance<R, V, C>`'s `context` member; omit the option and everything stays exactly as before — the context is `undefined` and existing routers keep their types and behavior
 - Thread the context type through the context generic to type a guard precisely: `GuardContext<R, S, P, {api: Api}>` (the same manual-generic pattern the `params`/`search` generics use — the route table is declared before the router, so the loose default cannot know the router's context)
 - One value per instance, read synchronously: not a reactive store, nothing re-resolves on change, and it takes no part in the viewStack snapshot keys — instance-level state is naturally isolated between routers
-- `@native-router/react` forwards the same option: `createRouter` options, `<Router>`/`HistoryRouter`/`HashRouter`/`MemoryRouter` props, and the `data` loader's `ctx.context` all carry it
+- `@native-router/react` forwards the same option: `createRouter` options, `<Router>`/`HistoryRouter`/`HashRouter`/`<MemoryRouter>` props, and the `data` loader's `ctx.context` all carry it
+
+### Route context
+
+A route may additionally declare a `context` object of its own. It is merged **over** the router context — the route wins on key conflicts — for the declaring level and every deeper level of its chain:
+
+```ts
+const routes = {
+  path: '',
+  context: {theme: 'light'}, // ← layout-level defaults
+  children: [
+    {
+      path: '/admin',
+      context: {role: 'admin'}, // ← inherits theme, adds role
+      children: [
+        // this guard's ctx.context is {theme: 'light', role: 'admin'}
+        {path: '/audit', beforeLoad: ({context}) => context.role === 'admin' || context.theme}
+      ]
+    }
+  ]
+};
+```
+
+- `beforeLoad` guards receive the merge accumulated through their own level (ancestors' declarations plus their own), exactly how matched `params` accumulate; `resolveView` receives the fold over the whole matched chain
+- Levels without `context` (or a `null` one) contribute nothing — tables that never declare route contexts keep the exact instance-context value they always had, byte for byte
+- The merge is a shallow spread at resolve time: not reactive, mutating the declared object later does not re-resolve anything
 
 ## Design principles
 

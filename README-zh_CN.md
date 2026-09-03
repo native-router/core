@@ -244,6 +244,31 @@ router.context; // {api: myApi} —— 类型由该选项推导
 - 每实例一份、同步读取：不是响应式 store，变更不触发任何重新解析，也不参与 viewStack 快照 key——实例级状态天然互相隔离
 - `@native-router/react` 透传同一选项：`createRouter` 的 options、`<Router>`/`HistoryRouter`/`HashRouter`/`MemoryRouter` 的 props、以及 `data` loader 的 `ctx.context` 都携带它
 
+### 路由级上下文
+
+路由还可以声明自己的 `context` 对象。它**覆盖合并**在 router context 之上（同名 key 路由优先），作用于声明它的层级及其所有更深层级：
+
+```ts
+const routes = {
+  path: '',
+  context: {theme: 'light'}, // ← 布局级默认值
+  children: [
+    {
+      path: '/admin',
+      context: {role: 'admin'}, // ← 继承 theme，追加 role
+      children: [
+        // 该守卫的 ctx.context 是 {theme: 'light', role: 'admin'}
+        {path: '/audit', beforeLoad: ({context}) => context.role === 'admin' || context.theme}
+      ]
+    }
+  ]
+};
+```
+
+- `beforeLoad` 守卫收到「累积到自身层级」的合并结果（祖先的声明加上自己的），与 `params` 的逐级累积完全同构；`resolveView` 收到整条匹配链的全量合并
+- 不声明 `context`（或声明为 `null`）的层级不贡献任何东西——从不声明路由 context 的表拿到的仍是原样的实例 context，逐字节不变
+- 合并是解析时的一次浅拷贝：非响应式，事后修改声明的对象不会触发任何重新解析
+
 ## 设计原则
 
 **导航语义跟随浏览器**——native-router 对齐的是浏览器原生导航语义（browser-native navigation semantics），而非其它 SPA 路由库的行为。后续所有导航 API 设计决策都以此为唯一准绳，「某个流行 router 有」本身不构成跟进的理由。这些是有意设计，不是待修的 bug。
