@@ -17,6 +17,17 @@ import type {
 import {parseParams, parseSearch, parseSearchInput} from './search';
 import {createCurrentGuard, noop, reject} from './util';
 import {
+  emitDebugCancel,
+  emitDebugCommit,
+  emitDebugError,
+  emitDebugReplay,
+  emitDebugSupersede,
+  getDebugInfo,
+  markDebugChain,
+  onDebug
+} from './debug';
+import type {DebugChain} from './debug';
+import {
   NavigationCancelledError,
   NotFoundError,
   RedirectLoopError
@@ -166,7 +177,12 @@ export function create<R extends BaseRoute = BaseRoute, V = any, C = undefined>(
       options?.preloadConcurrency || DEFAULT_PRELOAD_CONCURRENCY,
     // Instance context: explicit (not just the spread above) so the
     // member always exists — `undefined` for context-less routers.
-    context: options?.context
+    context: options?.context,
+    // Observability surface (see src/debug.ts): attached after the
+    // options spread so nothing can override them. Purely
+    // observational; free when no listener is registered.
+    onDebug: (listener) => onDebug(router, listener),
+    getDebugInfo: () => getDebugInfo(router)
   };
 
   if (options?.currentView) {
@@ -1013,7 +1029,8 @@ function pushEntry<R extends BaseRoute = BaseRoute, V = any>(
         state: location.state,
         ...serializeStack(router)
       });
-    }
+    },
+    'push'
   );
 }
 
@@ -1050,7 +1067,8 @@ function replaceEntry<R extends BaseRoute = BaseRoute, V = any>(
   router: RouterCore<R, V>,
   entryPromise: Promise<ResolvedEntry<V>>,
   fromLocation: Location,
-  ac?: AbortController
+  ac?: AbortController,
+  action: NavAction = 'replace'
 ): Promise<void> {
   const {history} = router;
   const {index} = getHistoryState(router);
@@ -1081,7 +1099,8 @@ function replaceEntry<R extends BaseRoute = BaseRoute, V = any>(
         state: location.state,
         ...serializeStack(router)
       });
-    }
+    },
+    action
   );
 }
 
@@ -1090,7 +1109,8 @@ function commitBase<R extends BaseRoute = BaseRoute, V = any>(
   entryPromise: Promise<ResolvedEntry<V>>,
   location: Location,
   ac: AbortController | undefined,
-  onResolved: (resolvedView: V, entry: ResolvedEntry<V>) => void
+  onResolved: (resolvedView: V, entry: ResolvedEntry<V>) => void,
+  action: NavAction
 ): Promise<void> {
   const core = router as RouterCore<R, V>;
   // A pending rewind(a vetoed POP's counter-`go()`, still in flight in
@@ -1111,6 +1131,10 @@ function commitBase<R extends BaseRoute = BaseRoute, V = any>(
     // chain's result, so its in-flight guards/loaders must not keep
     // consuming the network until they settle on their own.
     core.resolvingController?.abort();
+    // The superseded chain's own debug terminal event — its promise
+    // rejects with NavigationCancelledError, which carries no "who
+    // replaced me" detail.
+    emitDebugSupersede(core, createPath(location));
   }
   router.resolving = location;
   // External commits(plain tasks from resolveTo/preload) carry no
@@ -1118,6 +1142,9 @@ function commitBase<R extends BaseRoute = BaseRoute, V = any>(
   // by a later supersede.
   core.resolvingController = ac;
   onLoadingChange('pending');
+  // The chain's observability record(also what getDebugInfo reports as
+  // `resolving`) plus its nav-start event.
+  const debugChain: DebugChain = markDebugChain(core, action, location);
   return (
     // The whole chain — route guards AND the view task — is guarded from
     // the very start: a superseding navigation or a cancel() while slow
@@ -1143,9 +1170,13 @@ function commitBase<R extends BaseRoute = BaseRoute, V = any>(
         // The navigation consumed this resolution: drop its preload
         // cache slots so a later preload re-resolves fresh state.
         evictPreloadCache<V>(router, entry.location);
+        return entry;
       })
-      .then(() => {
+      .then((entry) => {
         onLoadingChange('resolved');
+        // The commit event reports the chain's terminal location — a
+        // guard redirect may have moved it away from the request.
+        emitDebugCommit(core, debugChain, entry.location);
       })
       .catch((e) => {
         // A discarded chain rejects with NavigationCancelledError, but
@@ -1157,6 +1188,7 @@ function commitBase<R extends BaseRoute = BaseRoute, V = any>(
         if (e instanceof NavigationCancelledError) throw e;
         router.resolving = undefined;
         onLoadingChange('rejected');
+        emitDebugError(core, debugChain, e);
         throw e;
       })
   );
@@ -1244,13 +1276,28 @@ export function navigate<R extends BaseRoute = BaseRoute, V = any>(
 export function refresh<R extends BaseRoute = BaseRoute, V = any>(
   router: RouterInstance<R, V>
 ) {
+  return refreshEntry(router, 'replace');
+}
+
+/**
+ * The refresh pipeline with an explicit navigation action, so the lazy
+ * re-resolve of a landed history entry(see {@link listen}) can report
+ * the landing's own kind to observability consumers while still
+ * committing through the replace pipeline, exactly like the public
+ * {@link refresh} does.
+ */
+function refreshEntry<R extends BaseRoute = BaseRoute, V = any>(
+  router: RouterInstance<R, V>,
+  action: NavAction
+) {
   const location = getLocation(router);
   const ac = new AbortController();
   return replaceEntry(
     router as RouterCore<R, V>,
     resolveEntry<R, V>(router, location, {signal: ac.signal}),
     location,
-    ac
+    ac,
+    action
   );
 }
 
@@ -1325,6 +1372,9 @@ export function cancel<R extends BaseRoute = BaseRoute, V = any>(
   // history handler and must not have its(possibly still-rendered) view
   // contexts aborted after the fact.
   if (router.resolving) {
+    // The cancelled chain's own debug terminal event — emitted before
+    // the abort so listeners see the decision, not its aftermath.
+    emitDebugCancel(router);
     core.resolvingController?.abort();
     core.resolvingController = undefined;
   }
@@ -1703,8 +1753,10 @@ export function listen<R extends BaseRoute = BaseRoute, V = any>(
       // state: re-resolving the landed entry also re-serializes the
       // window into it via the replace commit. A guard failure here
       // must not surface as an unhandled rejection — the landed entry
-      // simply keeps its(unknown) view.
-      refresh(router).catch(noop);
+      // simply keeps its(unknown) view. The chain reports the landing's
+      // own action to debug consumers while committing through the
+      // replace pipeline.
+      refreshEntry<R, V>(router, navAction).catch(noop);
     } else if (action === 'POP') {
       // Sync the current window into the landed entry so a later
       // refresh("refresh → back → refresh again") still restores it.
@@ -1713,6 +1765,9 @@ export function listen<R extends BaseRoute = BaseRoute, V = any>(
         index,
         ...serializeStack(router)
       });
+      // The snapshot replay's standalone commit event: no chain ever
+      // started, zero requests resolved this landing.
+      emitDebugReplay(router, location);
     }
     lastSettled.set(router, {index, location});
   });

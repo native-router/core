@@ -74,6 +74,7 @@ commit(router, entry.task, entry.location); // 像点击一样提交
 - 导航拦截器：`setBlocker(router, fn)` 注册同步的 `(to, from) => boolean` 否决谓词（入参为路径字符串），在每条 `navigate`/`commit`/`commitReplace` 链头与每个 history POP 落地前询问；被否决的导航不会启动，其 promise 立即 resolve（否决是用户的正常决定——不是错误——而被取消的导航以 `NavigationCancelledError` reject），被否决的 POP 以反向 `go()` 回退、且不影响进行中的导航——经典的未保存提醒守卫。`refresh` 与守卫重定向永不被阻塞
 - 导航 API：`navigate`、`refresh`、`go`/`forward`/`back`、`commit`/`commitReplace`、`createHref`、`getParams`、`match`、`toLocation`、`resolve`、`resolveTo`
 - `invalidate(router)`：一次性丢弃会话视图快照——当前视图保持渲染（不重解析、不重渲染），下一次前进/后退经守卫重新解析；典型调用点是登出/切换账号之后，防止 POP 回退渲染上一账号数据或绕过会话内已执行过的守卫
+- 可观察性：每个路由器自带 `onDebug`/`getDebugInfo`（见「可观察性 / debug 事件」一节）——纯观察的导航生命周期事件流（`nav-start`/`nav-commit`/`nav-cancel`/`nav-supersede`/`nav-error`，带 POP 快照回放标志）加可轮询的状态快照；未使用时零开销
 - 基于 [Standard Schema](https://standardschema.dev) 的 search 校验：任意路由层可声明 `search` 校验器（zod/valibot/arktype，无硬依赖），用 `parseSearch`/`parseSearchSync` 解析；失败抛出 `SearchError`
 - 基于 `searchDeps` 的 search 精细失效：在每层声明本层解析消费的 search 键（`[]` = 完全不消费，函数形式自行推导投影），同路径导航若每层投影不变，直接复用当前视图快照——零守卫、零 loader、零懒加载，与 POP 命中 `viewStack` 完全一致；未声明的层保持「每次导航重解析」的现状（逐字节一致）；`reusableEntry` 导出该判定，供框架 setter 以同一语义提交 search 写入
 - `preload(router, to, {ttl})`：提前经守卫解析目标，并发调用共享同一任务（in-flight 去重）并带 TTL（默认 30 秒）；commit 消费后即失效。预取有界且可取消：每次预取运行在自己的 `AbortSignal` 下（经 `ctx.signal` 交给守卫与加载器），在飞数量超出 `preloadConcurrency`（默认 4，`create` 选项）时最旧者按 FIFO 被 abort——缓存槽位随之丢弃、失败按后台语义吞掉；被导航消费的预取绝不会被上限中止
@@ -268,6 +269,39 @@ const routes = {
 - `beforeLoad` 守卫收到「累积到自身层级」的合并结果（祖先的声明加上自己的），与 `params` 的逐级累积完全同构；`resolveView` 收到整条匹配链的全量合并
 - 不声明 `context`（或声明为 `null`）的层级不贡献任何东西——从不声明路由 context 的表拿到的仍是原样的实例 context，逐字节不变
 - 合并是解析时的一次浅拷贝：非响应式，事后修改声明的对象不会触发任何重新解析
+
+## 可观察性 / debug 事件
+
+路由器内置一层面向 DevTool 类消费方的最小观察面。**opt-in、只观察不干预**——事件描述导航，绝不影响导航；未注册监听时零事件，每条导航的簿记开销只有几次属性写入。
+
+```ts
+import {create, listen, navigate} from '@native-router/core';
+
+const router = create(routes, history, resolveView);
+
+// 挂在 router 实例上（等价的独立函数：onDebug(router, fn)）
+const off = router.onDebug((event) => console.log(event));
+const info = router.getDebugInfo(); // 可轮询的状态快照
+```
+
+`onDebug` 输出导航生命周期事件流：
+
+| 事件 | 触发时机 | 特有字段 |
+| --- | --- | --- |
+| `nav-start` | 导航链开始解析（`navigate`/`commit`/`commitReplace`/`refresh`，或落位条目缺快照时的惰性重解析） | `action`、`to`（**请求**目标） |
+| `nav-commit` | 链已提交——history 条目落位 | `to`（**最终**落点，含守卫重定向）、距 `nav-start` 的 `duration` 毫秒、`replay` |
+| `nav-supersede` | 链在飞行中被更新的导航取代 | `by`——取代者的目标路径 |
+| `nav-cancel` | 链被 `cancel()` 中止（显式调用，或被 history 落位/unlisten 重入） | |
+| `nav-error` | 链以真实错误失败（`NotFoundError`、loader 拒绝……） | `error` |
+
+每个事件都带 `action`（`'push' | 'replace' | 'pop'`）、相关的 `to` 路径和 epoch 毫秒的 `at` 时间戳。两个值得注意的细节：
+
+- **POP 快照回放是一条孤立的 `nav-commit`。** 命中 `viewStack` 快照的 POP 不经过链——只发一条 `nav-commit`，`action: 'pop'`、`replay: true`、`duration: 0`。未命中快照的 POP（窗口外，或 `invalidate()` 之后）走重解析，完整报告 `nav-start` → `nav-commit`，`replay: false`，且保留落位的 `pop` 动作。
+- **`nav-commit.to` 是最终落点。** 守卫重定向会把落点挪离请求；`nav-start.to` 保留请求目标，`nav-commit.to` 报告实际落位。
+
+`getDebugInfo()` 是事件流的快照补充——当前 location、history `index`、会话窗口深度（`stackDepth`）与基点（`baseIndex`）、窗口内持有的视图快照数（`snapshots`）、在飞导航链（`resolving`：`{action, to, startedAt}` 或 `null`）。无论有没有监听者都能用，面板可以一边用 `onDebug` 渲染事件时间线，一边轮询它。
+
+抛异常的监听者会被吞掉——可观察性不能破坏被观察者。react 绑定把同一观察面封装为 `useRouteDebug` hook。
 
 ## 设计原则
 

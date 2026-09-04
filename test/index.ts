@@ -51,6 +51,7 @@ import {
   SearchError
 } from '../src/errors';
 import {createAsyncGoHistory} from './util';
+import {getDebugInfo, onDebug} from '../src/debug';
 
 describe('Router', () => {
   describe('match', () => {
@@ -1711,6 +1712,355 @@ describe('Router', () => {
       resolveView.callCount.should.equal(resolveCount);
       views.length.should.equal(viewCount);
       history.location.pathname.should.equal('/b');
+    });
+  });
+
+  describe('observability', () => {
+    const tick = () =>
+      new Promise((done) => {
+        setTimeout(done);
+      });
+
+    // Loose view of DebugEvent for should-style assertions: every field
+    // optional except `type`, so destructuring needs no tuple casts.
+    type Event = {
+      type: string;
+      action?: NavAction;
+      to?: string;
+      at?: number;
+      duration?: number;
+      replay?: boolean;
+      by?: string;
+      error?: unknown;
+    };
+
+    it('should emit nav-start then nav-commit for a push navigation', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const router = create(
+        {path: '', children: [{path: '/a'}, {path: '/b'}]},
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const events: Event[] = [];
+      router.onDebug!((e) => events.push(e));
+
+      await navigate(router, '/b');
+      events.should.have.length(2);
+      const [start, commitEvent] = events;
+      start.type.should.equal('nav-start');
+      start.action!.should.equal('push');
+      start.to!.should.equal('/b');
+      Should(start.at!).be.a.Number();
+      commitEvent.type.should.equal('nav-commit');
+      commitEvent.action!.should.equal('push');
+      commitEvent.to!.should.equal('/b');
+      commitEvent.replay!.should.be.false();
+      commitEvent.duration!.should.be.a.Number();
+      (commitEvent.duration! >= 0).should.be.true();
+    });
+
+    it('should report the terminal location on nav-commit when guards redirected', async () => {
+      const history = createMemoryHistory({initialEntries: ['/b']});
+      const router = create(
+        {path: '', children: [{path: '/a', redirect: '/b'}, {path: '/b'}]},
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const events: Event[] = [];
+      router.onDebug!((e) => events.push(e));
+
+      await navigate(router, '/a');
+      const [start, commitEvent] = events;
+      // The start reports the request, the commit the landing.
+      start.to!.should.equal('/a');
+      commitEvent.to!.should.equal('/b');
+    });
+
+    it('should emit a standalone replay commit for a POP served from the viewStack', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const router = create(
+        {path: '', children: [{path: '/a'}, {path: '/b'}]},
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const events: Event[] = [];
+      router.onDebug!((e) => events.push(e));
+      listen(router, () => {});
+      await tick();
+      // Drop the listen warm-up chain(nav-start/nav-commit of the
+      // initial lazy re-resolve).
+      events.length = 0;
+
+      await navigate(router, '/b');
+      events.length = 0;
+      go(router, -1);
+      await tick();
+
+      events.should.have.length(1);
+      const [commitEvent] = events;
+      commitEvent.type.should.equal('nav-commit');
+      commitEvent.action!.should.equal('pop');
+      commitEvent.to!.should.equal('/a');
+      commitEvent.replay!.should.be.true();
+      commitEvent.duration!.should.equal(0);
+    });
+
+    it('should re-resolve a POP past invalidate as a fresh pop chain, not a replay', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const router = create(
+        {path: '', children: [{path: '/a'}, {path: '/b'}]},
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const events: Event[] = [];
+      router.onDebug!((e) => events.push(e));
+      listen(router, () => {});
+      await tick();
+      await navigate(router, '/b');
+      invalidate(router);
+      events.length = 0;
+
+      go(router, -1);
+      await tick();
+      const [start, commitEvent] = events;
+      start.type.should.equal('nav-start');
+      start.action!.should.equal('pop');
+      start.to!.should.equal('/a');
+      commitEvent.type.should.equal('nav-commit');
+      commitEvent.action!.should.equal('pop');
+      commitEvent.to!.should.equal('/a');
+      commitEvent.replay!.should.be.false();
+    });
+
+    it('should emit nav-supersede with the replacing target when a chain is discarded', async () => {
+      const park = new Promise<undefined>(() => {});
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const router = create(
+        {
+          path: '',
+          children: [
+            {path: '/a'},
+            {path: '/b', beforeLoad: () => park},
+            {path: '/c'}
+          ]
+        },
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const events: Event[] = [];
+      router.onDebug!((e) => events.push(e));
+
+      navigate(router, '/b').catch(() => undefined);
+      await tick();
+      await navigate(router, '/c');
+
+      events
+        .map(({type}) => type)
+        .should.deepEqual([
+          'nav-start',
+          'nav-supersede',
+          'nav-start',
+          'nav-commit'
+        ]);
+      const supersede = events[1];
+      supersede.action!.should.equal('push');
+      supersede.to!.should.equal('/b');
+      supersede.by!.should.equal('/c');
+      (supersede.duration! >= 0).should.be.true();
+      // The settled winner reports itself, not the discarded chain.
+      events[3]!.to!.should.equal('/c');
+    });
+
+    it('should emit nav-cancel when cancel() aborts the in-flight chain', async () => {
+      const park = new Promise<undefined>(() => {});
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const router = create(
+        {
+          path: '',
+          children: [{path: '/a'}, {path: '/b', beforeLoad: () => park}]
+        },
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const events: Event[] = [];
+      router.onDebug!((e) => events.push(e));
+
+      navigate(router, '/b').catch(() => undefined);
+      await tick();
+      cancel(router);
+
+      events
+        .map(({type}) => type)
+        .should.deepEqual(['nav-start', 'nav-cancel']);
+      const [start, cancelEvent] = events;
+      start.to!.should.equal('/b');
+      cancelEvent.to!.should.equal('/b');
+      cancelEvent.action!.should.equal('push');
+      (cancelEvent.duration! >= 0).should.be.true();
+      (getDebugInfo(router).resolving === null).should.be.true();
+    });
+
+    it('should cancel an in-flight chain when a history POP lands on a snapshot', async () => {
+      const park = new Promise<undefined>(() => {});
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const router = create(
+        {
+          path: '',
+          children: [
+            {path: '/a'},
+            {path: '/b', beforeLoad: () => park},
+            {path: '/c'}
+          ]
+        },
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const events: Event[] = [];
+      router.onDebug!((e) => events.push(e));
+      listen(router, () => {});
+      await tick();
+      events.length = 0;
+
+      navigate(router, '/b').catch(() => undefined);
+      await tick();
+      go(router, -1);
+      await tick();
+
+      events
+        .map(({type}) => type)
+        .should.deepEqual(['nav-start', 'nav-cancel', 'nav-commit']);
+      events[1]!.to!.should.equal('/b');
+      const replay = events[2];
+      replay.action!.should.equal('pop');
+      replay.to!.should.equal('/a');
+      replay.replay!.should.be.true();
+    });
+
+    it('should emit nav-error with the failing error and clear the chain', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const router = create(
+        {path: '', children: [{path: '/a'}]},
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const events: Event[] = [];
+      router.onDebug!((e) => events.push(e));
+
+      await navigate(router, '/missing').should.be.rejectedWith(NotFoundError);
+      events.map(({type}) => type).should.deepEqual(['nav-start', 'nav-error']);
+      const errorEvent = events[1];
+      errorEvent.action!.should.equal('push');
+      errorEvent.to!.should.equal('/missing');
+      Should(errorEvent.error!).be.an.instanceOf(NotFoundError);
+      (getDebugInfo(router).resolving === null).should.be.true();
+    });
+
+    it('should report replace chains for refresh', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const router = create(
+        {path: '', children: [{path: '/a'}]},
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const events: Event[] = [];
+      router.onDebug!((e) => events.push(e));
+
+      await refresh(router);
+      events
+        .map(({type}) => type)
+        .should.deepEqual(['nav-start', 'nav-commit']);
+      events[0]!.action!.should.equal('replace');
+      events[1]!.action!.should.equal('replace');
+    });
+
+    it('should snapshot the router state in getDebugInfo without any listener', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const router = create(
+        {path: '', children: [{path: '/a'}, {path: '/b'}]},
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+
+      // Before anything resolved: a fresh router has an empty stack and
+      // no snapshots yet.
+      const initial = getDebugInfo(router);
+      initial.to!.should.equal('/a');
+      initial.index!.should.equal(0);
+      initial.stackDepth!.should.equal(1);
+      initial.baseIndex!.should.equal(0);
+      initial.snapshots!.should.equal(0);
+      (initial.resolving === null).should.be.true();
+
+      await navigate(router, '/b');
+      const after = getDebugInfo(router);
+      after.to!.should.equal('/b');
+      after.index!.should.equal(1);
+      after.stackDepth!.should.equal(2);
+      after.baseIndex!.should.equal(0);
+      // Only the navigated entry has a view — the initial '/a' entry
+      // never resolved(no listen warm-up in this test), its slot stays
+      // a hole.
+      after.snapshots!.should.equal(1);
+      (after.resolving === null).should.be.true();
+    });
+
+    it('should expose the in-flight chain through getDebugInfo while resolving', async () => {
+      let release!: () => void;
+      const parked = new Promise<void>((done) => {
+        release = done;
+      });
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const router = create(
+        {path: '', children: [{path: '/a'}, {path: '/b'}]},
+        history,
+        (matched) =>
+          matched.at(-1)!.path === '/b'
+            ? parked.then(() => 'view:/b')
+            : Promise.resolve('view:/a')
+      );
+      const navigating = navigate(router, '/b');
+      const mid = getDebugInfo(router);
+      mid.resolving!.action.should.equal('push');
+      mid.resolving!.to.should.equal('/b');
+      Should(mid.resolving!.startedAt).be.a.Number();
+
+      release();
+      await navigating;
+      (getDebugInfo(router).resolving === null).should.be.true();
+    });
+
+    it('should work through the standalone onDebug function and stop after unsubscribe', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const router = create(
+        {path: '', children: [{path: '/a'}, {path: '/b'}]},
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      const events: Event[] = [];
+      const off = onDebug(router, (e) => events.push(e));
+
+      await navigate(router, '/b');
+      events.should.have.length(2);
+      off();
+      off(); // Idempotent.
+      await navigate(router, '/a');
+      events.should.have.length(2);
+    });
+
+    it('should swallow a throwing listener without breaking the navigation', async () => {
+      const history = createMemoryHistory({initialEntries: ['/a']});
+      const router = create(
+        {path: '', children: [{path: '/a'}, {path: '/b'}]},
+        history,
+        (matched) => Promise.resolve(`view:${matched.at(-1)!.path}`)
+      );
+      router.onDebug!(() => {
+        throw new Error('listener bug');
+      });
+
+      await navigate(router, '/b');
+      history.location.pathname.should.equal('/b');
+      getCurrentView(router).should.equal('view:/b');
     });
   });
 

@@ -74,6 +74,7 @@ commit(router, entry.task, entry.location); // commit like a click
 - Navigation blockers: `setBlocker(router, fn)` registers a synchronous `(to, from) => boolean` veto over path strings, asked at the head of every `navigate`/`commit`/`commitReplace` and before a history POP lands; a vetoed navigation never starts and its promise resolves immediately (a veto is the user saying no — a normal outcome, not an error — whereas a cancelled navigation rejects with `NavigationCancelledError`), a vetoed POP is rewound with a counter-`go()` that leaves any in-flight navigation running — the classic unsaved-changes guard. `refresh` and guard redirects are never blocked
 - Navigation API: `navigate`, `refresh`, `go`/`forward`/`back`, `commit`/`commitReplace`, `createHref`, `getParams`, `match`, `toLocation`, `resolve`, `resolveTo`
 - `invalidate(router)`: drop the session view snapshots in one call — the current view stays rendered (no re-resolve, no re-render) and the next back/forward re-resolves through the guards; the typical call site is right after a logout/account switch, so a POP cannot render the previous account's data or bypass guards that already ran
+- Observability: `onDebug`/`getDebugInfo` on every router (see [Observability / debug events](#observability--debug-events)) — a purely observational navigation lifecycle stream (`nav-start`/`nav-commit`/`nav-cancel`/`nav-supersede`/`nav-error`, with the POP snapshot-replay flag) plus a poll-friendly state snapshot; free when unused
 - Search validation via [Standard Schema](https://standardschema.dev): a `search` schema on any route level (zod/valibot/arktype, no hard dependency), parsed with `parseSearch`/`parseSearchSync`; failures throw `SearchError`
 - Fine-grained search invalidation via `searchDeps`: declare on each level the search keys its resolution consumes (`[]` = none, a function derives the projection) and a same-path navigation that leaves every declared projection unchanged re-serves the current view snapshot — zero guards, zero loaders, zero lazy imports, exactly like a POP hitting the `viewStack`; undeclared levels keep the resolve-on-every-navigation behavior byte for byte, and `reusableEntry` exports the check for framework setters
 - `preload(router, to, {ttl})`: resolve a target through the guards ahead of time, sharing one task across concurrent callers (in-flight dedup) with a TTL, default 30s; consumed entries are dropped on commit. Prefetches are bounded and cancelable: each runs under its own `AbortSignal` (handed to guards and loaders as `ctx.signal`), and over `preloadConcurrency` (default 4, a `create` option) in flight the oldest is aborted FIFO — its cache slot is dropped and its failure swallowed as background noise, while a preload consumed by a committing navigation is never aborted
@@ -269,6 +270,39 @@ const routes = {
 - `beforeLoad` guards receive the merge accumulated through their own level (ancestors' declarations plus their own), exactly how matched `params` accumulate; `resolveView` receives the fold over the whole matched chain
 - Levels without `context` (or a `null` one) contribute nothing — tables that never declare route contexts keep the exact instance-context value they always had, byte for byte
 - The merge is a shallow spread at resolve time: not reactive, mutating the declared object later does not re-resolve anything
+
+## Observability / debug events
+
+The router ships a minimal observation surface for DevTool-style consumers. It is **opt-in and purely observational** — events describe navigations, they never influence them, and with no listener registered nothing is emitted and the per-navigation bookkeeping is a couple of property writes.
+
+```ts
+import {create, listen, navigate} from '@native-router/core';
+
+const router = create(routes, history, resolveView);
+
+// On the router instance (or the standalone onDebug(router, fn) function)
+const off = router.onDebug((event) => console.log(event));
+const info = router.getDebugInfo(); // poll-friendly snapshot
+```
+
+`onDebug` emits a navigation lifecycle stream:
+
+| Event | When | Notable fields |
+| --- | --- | --- |
+| `nav-start` | a navigation chain starts resolving (`navigate`/`commit`/`commitReplace`/`refresh`, or the lazy re-resolve of a landed entry) | `action`, `to` (the **requested** target) |
+| `nav-commit` | the chain committed — the history entry landed | `to` (the **terminal** location; guard redirects included), `duration` ms since `nav-start`, `replay` |
+| `nav-supersede` | the chain was discarded because a newer navigation started while it was in flight | `by` — the superseding chain's target |
+| `nav-cancel` | the chain was aborted by `cancel()` (explicitly, or re-entered by a history landing / unlisten) | |
+| `nav-error` | the chain failed with a real error (`NotFoundError`, a loader rejection, ...) | `error` |
+
+Every event carries `action` (`'push' | 'replace' | 'pop'`), the relevant `to` path, and an epoch-ms `at` timestamp. Two details worth knowing:
+
+- **POP snapshot replay is a lone `nav-commit`.** A POP landing on a `viewStack` snapshot never starts a chain — it emits a single `nav-commit` with `action: 'pop'`, `replay: true` and `duration: 0`. A POP that misses the snapshot (out-of-window, or after `invalidate()`) re-resolves and reports the full `nav-start` → `nav-commit` sequence with `replay: false`, keeping the landing's `pop` action.
+- **`nav-commit.to` is the terminal location.** A guard redirect moves the commit away from the request; `nav-start.to` keeps what was asked, `nav-commit.to` reports where it landed.
+
+`getDebugInfo()` complements the stream with a snapshot — the current location, the history `index`, the session window's depth (`stackDepth`) and base (`baseIndex`), how many view snapshots the window holds (`snapshots`), and the in-flight chain (`resolving`: `{action, to, startedAt}` or `null`). It works with or without listeners, so a panel can poll it while rendering the event timeline from `onDebug`.
+
+A crashing listener is swallowed — observability must not break its subject. The react bindings wrap the same surface into the `useRouteDebug` hook.
 
 ## Design principles
 

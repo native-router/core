@@ -1,5 +1,6 @@
 import type {Path, MatchResult} from 'path-to-regexp';
 import type {History, Path as HPath} from 'history';
+import type {DebugInfo, DebugListener} from './debug';
 
 export type Location<T = any> = HPath & {state?: T};
 
@@ -546,6 +547,21 @@ export type RouterInstance<R extends BaseRoute, V = any, C = any> = {
   currentGuard<T>(promise: Promise<T>, discarded: () => Error): Promise<T>;
   cancelAll(): void;
   resolving?: Location;
+  /**
+   * Subscribe to navigation lifecycle debug events(`nav-start`/
+   * `nav-commit`/`nav-cancel`/`nav-supersede`/`nav-error`, see
+   * {@link DebugEvent}). Attached by {@link create}; purely
+   * observational and free when unused. The standalone
+   * {@link onDebug} function does the same for any router object.
+   */
+  onDebug?: (listener: DebugListener) => () => void;
+  /**
+   * Take an observability snapshot(current location, session window
+   * depth/base, snapshot count, the in-flight chain — see
+   * {@link DebugInfo}). Attached by {@link create}; the standalone
+   * {@link getDebugInfo} function does the same for any router object.
+   */
+  getDebugInfo?: () => DebugInfo;
   /**
    * The router's {@link Options.context instance context} — the value
    * passed as `context` to {@link create}, `undefined` for context-less
