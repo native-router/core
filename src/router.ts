@@ -673,7 +673,11 @@ export function resolveTo<R extends BaseRoute = BaseRoute, V = any>(
  * map unless some level declares a {@link BaseRoute.params params
  * schema} — the deepest schema seen so far has already upgraded them to
  * its output(its validation failure rides the same channel with a
- * `ParamsError`).
+ * `ParamsError`). A deeper level re-declaring a same-name segment with
+ * the same raw value keeps the coerced value(a schema-declaring level
+ * re-binds it to the raw string so its own schema coerces it); a
+ * different raw value is a new binding and the deeper string wins, as
+ * the raw deep-over-shallow merge always had it.
  *
  * @group Methods
  * @category Router
@@ -712,6 +716,13 @@ export async function resolveEntry<R extends BaseRoute = BaseRoute, V = any>(
     // upgrades them to the schema output before its guard runs, so
     // guards of deeper levels see coerced params of the whole prefix.
     let params: Record<string, string> = {};
+    // The raw binding each key's current schema output was validated
+    // against: a deeper schema-less level re-declaring a same-name
+    // segment with the SAME raw value keeps the coerced value instead
+    // of clobbering it back to the raw string; a different raw value is
+    // a new binding, and the deeper string wins (deep-over-shallow on
+    // raw params, unchanged).
+    const coercedFrom = new Map<string, string>();
     // The instance context folded through the prefix's route contexts:
     // a level's guard sees its ancestors' declarations plus its own —
     // the guard-side twin of the params accumulation above. Loosely
@@ -720,7 +731,21 @@ export async function resolveEntry<R extends BaseRoute = BaseRoute, V = any>(
     let {context} = router;
     for (let i = 0; i < matched.length; i++) {
       const {route} = matched[i];
-      params = {...params, ...matched[i].params};
+      const schemaRuns = route.params !== undefined && !route.redirect;
+      const merged: Record<string, string> = {...params};
+      // A schema-declaring level re-binds its own segments to their raw
+      // strings, so its schema coerces the URL-side value; a schema-less
+      // level keeps a coerced value derived from the very same raw
+      // binding, and any other re-declaration is a new binding.
+      const acc = params;
+      Object.entries(matched[i].params).forEach(([key, raw]) => {
+        if (!schemaRuns && coercedFrom.get(key) === raw && key in acc) {
+          return; // same binding re-declared: keep the coerced value
+        }
+        merged[key] = raw;
+        coercedFrom.delete(key);
+      });
+      params = merged;
       context = mergeRouteContext(context, route);
       // The level's params schema runs before its guard, so the guard
       // sees the coerced output. A redirect level never runs its guard,
@@ -732,13 +757,27 @@ export async function resolveEntry<R extends BaseRoute = BaseRoute, V = any>(
       // task's errorHandler channel — the same route a search-schema
       // failure takes — instead of rejecting this entry, which preload
       // consumers share.
-      if (route.params && !route.redirect) {
+      if (schemaRuns) {
         try {
+          const input = params;
           // eslint-disable-next-line no-await-in-loop -- guards must run in declaration order, sequentially
-          params = (await parseParams(route.params, params)) as Record<
+          params = (await parseParams(route.params!, params)) as Record<
             string,
             string
           >;
+          const output = params;
+          // Every surviving key is now a schema output: string inputs
+          // record the raw binding they were validated against, so a
+          // deeper schema-less re-declaration of the same binding keeps
+          // the coerced value; non-string inputs were pass-throughs of
+          // an already-coerced value and keep their earlier raw root.
+          // Keys the schema dropped lose their record — a deeper
+          // re-declaration of such a name re-binds to its raw string.
+          Object.keys(input).forEach((key) => {
+            if (!(key in output)) coercedFrom.delete(key);
+            else if (typeof input[key] === 'string')
+              coercedFrom.set(key, input[key] as string);
+          });
         } catch (e) {
           return {
             location,

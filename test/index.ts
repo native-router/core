@@ -4593,6 +4593,77 @@ describe('params', () => {
     seen.should.deepEqual([{id: '9'}]);
   });
 
+  it('should keep the coerced value when a schema-less child re-declares the same raw binding', async () => {
+    // `/users/:id/files/:id` with the SAME id in both segments: the
+    // child re-declares the very binding the parent schema coerced, so
+    // the coerced value survives the deep-over-shallow merge instead of
+    // being clobbered back to the raw string.
+    const seen: unknown[] = [];
+    const history = createMemoryHistory({initialEntries: ['/']});
+    const routes: BaseRoute[] = [
+      {
+        path: '/users/:id',
+        params: idSchema,
+        children: [
+          {
+            path: '/files/:id',
+            beforeLoad: ({params}) => {
+              seen.push(params);
+            }
+          }
+        ]
+      }
+    ];
+    const router = create(routes, history, (matched) =>
+      Promise.resolve(`view:${matched.at(-1)!.path}`)
+    );
+    await navigate(router, '/users/7/files/7');
+    seen.should.deepEqual([{id: 7}]);
+  });
+
+  it('should hand a deeper schema the raw string of its own re-declared segment', async () => {
+    // The deeper level declares its own schema: its re-declared `id` is
+    // re-bound to the level's raw string first, so the schema coerces
+    // the URL-side value — the documented per-level parse, not a double
+    // coercion of the parent output.
+    const inputs: unknown[] = [];
+    const rawThenCoerce: StandardSchemaV1<unknown, {id: number}> = {
+      '~standard': {
+        version: 1,
+        vendor: 'test',
+        validate(value) {
+          inputs.push(value);
+          return idSchema['~standard'].validate(value);
+        }
+      }
+    };
+    const seen: unknown[] = [];
+    const history = createMemoryHistory({initialEntries: ['/']});
+    const routes: BaseRoute[] = [
+      {
+        path: '/users/:id',
+        params: idSchema,
+        children: [
+          {
+            path: '/files/:id',
+            params: rawThenCoerce,
+            beforeLoad: ({params}) => {
+              seen.push(params);
+            }
+          }
+        ]
+      }
+    ];
+    const router = create(routes, history, (matched) =>
+      Promise.resolve(`view:${matched.at(-1)!.path}`)
+    );
+    await navigate(router, '/users/7/files/7');
+    // The child schema saw the raw string of its own segment…
+    inputs.should.deepEqual([{id: '7'}]);
+    // …and its guard sees the coerced output.
+    seen.should.deepEqual([{id: 7}]);
+  });
+
   it('should validate a wildcard param through the merged string map', async () => {
     // The matcher hands wildcards over as `string[]` (path-to-regexp 8.4.2);
     // the schema is the place to normalize them.

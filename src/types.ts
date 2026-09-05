@@ -402,6 +402,12 @@ export type BaseRoute<T = any> = {
    * with a {@link BaseRoute.redirect redirect} skips the schema — the
    * guard never runs there, so the schema would have no consumer.
    *
+   * Same-name segments across levels: a deeper level re-declaring a
+   * param with the same raw value keeps the coerced value this schema
+   * produced(declare a schema on the deeper level to coerce its own
+   * raw binding instead); a different raw value is a new binding and
+   * the deeper string wins, exactly like the schema-less merge.
+   *
    * Omit it and the params stay the raw `Record<string, string>` the
    * matcher extracted — behavior is unchanged.
    */
