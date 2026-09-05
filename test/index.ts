@@ -4256,6 +4256,80 @@ describe('searchDeps', () => {
       reusableEntry(bare, toLocation(bare, '/list?tag=a&q=2')) === undefined
     ).should.be.true();
   });
+
+  it('should validate the target search against declared schemas before re-serving the snapshot', async () => {
+    // Same fixture shape as the `search` describe: coerces `page` into a
+    // positive integer, rejects anything else.
+    const pageSchema: StandardSchemaV1<unknown, {page: number}> = {
+      '~standard': {
+        version: 1,
+        vendor: 'test',
+        validate(value) {
+          const {page} = value as {page?: unknown};
+          const parsed = Number(page);
+          return Number.isInteger(parsed) && parsed >= 1
+            ? {value: {page: parsed}}
+            : {
+                issues: [
+                  {message: 'expected a positive integer', path: ['page']}
+                ]
+              };
+        }
+      }
+    };
+    const seen: unknown[] = [];
+    const history = createMemoryHistory({initialEntries: ['/list?page=2']});
+    const routes: BaseRoute[] = [
+      {
+        path: '',
+        searchDeps: [],
+        children: [
+          {
+            path: '/list',
+            search: pageSchema,
+            // `page` deliberately NOT declared: the projection is unchanged
+            // for any page value, so the fast path is the only line of
+            // defense between an invalid value and the URL.
+            searchDeps: [],
+            beforeLoad: ({search}) => {
+              seen.push(search);
+            }
+          }
+        ]
+      }
+    ];
+    const resolveView = sinon.fake((matched: any[]) =>
+      Promise.resolve(`view:${matched.at(-1)!.path}`)
+    );
+    const router = create(routes, history, resolveView, {
+      errorHandler: (e) =>
+        `fallback:${e instanceof SearchError ? e.issues[0].message : e}`
+    });
+    await warm(router);
+    seen.should.deepEqual([{page: 2}]);
+    resolveView.callCount.should.equal(1);
+
+    // A valid page outside the declared projection still takes the fast
+    // path: the snapshot is re-served, zero re-resolves.
+    await navigate(router, '/list?page=3&sort=name');
+    resolveView.callCount.should.equal(1);
+    seen.should.deepEqual([{page: 2}]);
+
+    // An INVALID page with the same unchanged projection must not re-serve
+    // the snapshot silently: reusableEntry answers undefined…
+    (
+      reusableEntry(router, toLocation(router, '/list?page=abc')) === undefined
+    ).should.be.true();
+    // …navigate abandons the fast path, the full resolution runs the
+    // schema through the guard chain, and the SearchError surfaces via
+    // errorHandler instead of the stale view. The entry still commits —
+    // the same semantics a full navigation to an invalid search has.
+    await navigate(router, '/list?page=abc');
+    resolveView.callCount.should.equal(1);
+    getCurrentView(router).should.equal('fallback:expected a positive integer');
+    history.location.search.should.equal('?page=abc');
+    seen.should.deepEqual([{page: 2}]);
+  });
 });
 
 describe('params', () => {

@@ -162,8 +162,9 @@ const router = create(
 ```
 
 - **快路径**：`navigate()` 目标为同 pathname、匹配链上**每层都声明了 `searchDeps`** 且每层投影在当前条目与目标之间不变 → 当前视图快照直接作为新条目提交——零守卫、零 loader、零懒加载，与 POP 命中 `viewStack` 完全一致。基于 `reusableEntry` 构建的框架 setter（react 的 `useSearchParams`/`useSetSearch`）走同一条路径
+- **schema 仍然校验**：复用快照前，目标的原始 search 会先过匹配链上每层声明的 `search` schema——被拒即放弃快路径，由完整重解析经既有错误通道抛出 `SearchError`，非法值绝不会免校验落进 URL。异步 search schema 则整链退出快路径（其判定无法同步等待）
 - **未声明（`undefined`）即现状，逐字节一致**：任何导航照旧整链重解析，与本特性之前的行为相同；链上任一层未声明 → 整链不走快路径
-- **契约是双向的——本层解析从 search 读到的一切都必须声明**：`search` schema 严格校验的键也应列进 `searchDeps`（快路径不跑 schema，未声明键的非法值会免校验落进 URL——react 的 `useSetSearch` 等写侧无论声明了什么都仍会在导航前整体校验）；`beforeLoad` 守卫读取的 search 键同理必须声明，否则这些键变化时守卫不会重跑
+- **契约是双向的——本层解析从 search 读到的一切都必须声明**：`beforeLoad` 守卫读取的 search 键必须声明，否则这些键变化时守卫不会重跑
 - **`hash` 与 `state` 永不参与比较**——它们不是 resolve 输入，全声明链上纯 hash 导航同样复用快照
 - **复用的视图是快照**：保留其 resolve 期上下文——`data` 与 matched `ctx` 是产生该视图那次 resolve 的快照；活 search 要用框架的 search hooks 读取（react 的 `useSearch`/`useSearchParams` 订阅 history，恒最新）
 - POP 回放、`initHistoryStack` 预热、`refresh()` 与 `invalidate()` 不受影响：`invalidate()` 清掉快照后，快路径失效直到下一次真实 resolve

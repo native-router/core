@@ -370,11 +370,13 @@ export type BaseRoute<T = any> = {
    * - One undeclared level in the chain re-resolves the whole chain on
    *   every navigation, exactly as before(undeclared is today's
    *   behavior, byte for byte).
-   * - Keys the {@link BaseRoute.search search schema} validates strictly
-   *   belong in `searchDeps` too: a skipped navigation runs no schema,
-   *   so an invalid value of an undeclared key lands in the URL
-   *   unchecked(setters like `useSetSearch` validate the whole value
-   *   before navigating regardless).
+   * - The target's raw search still validates against every matched
+   *   level's {@link BaseRoute.search search schema} before the snapshot
+   *   is re-served: a rejected value abandons the fast path and the full
+   *   resolution surfaces the `SearchError` through the normal error
+   *   channel, so an invalid value never lands in the URL unchecked.
+   *   An async search schema opts its chain out of the fast path
+   *   entirely(its verdict cannot be awaited synchronously).
    * - A skipped navigation runs no `beforeLoad`: a guard that reads
    *   search keys must see them listed, or it will not re-run when they
    *   change.

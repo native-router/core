@@ -14,7 +14,12 @@ import type {
   HistoryState,
   SearchInput
 } from './types';
-import {parseParams, parseSearch, parseSearchInput} from './search';
+import {
+  parseParams,
+  parseSearch,
+  parseSearchInput,
+  parseSearchSync
+} from './search';
 import {createCurrentGuard, noop, reject} from './util';
 import {
   emitDebugCancel,
@@ -306,7 +311,14 @@ function searchDepsKey(
  *   location, so every navigation re-resolves it, exactly as before
  *   this API existed;
  * - a declared level's projection differs between the current and the
- *   target search — the level consumed something, so the chain re-runs.
+ *   target search — the level consumed something, so the chain re-runs;
+ * - the target's raw search fails any matched level's declared
+ *   {@link BaseRoute.search search schema}: the fast path validates
+ *   synchronously before re-serving, and a failure falls back to the
+ *   full resolution so the `SearchError` surfaces through the normal
+ *   error channel instead of landing unchecked in the URL. An async
+ *   search schema (whose verdict cannot be awaited here) opts its chain
+ *   out of the fast path the same way.
  *
  * What is deliberately NOT compared: `hash` and `state` are not resolve
  * inputs, so on a fully declared chain a hash-only navigation is served
@@ -349,7 +361,28 @@ export function reusableEntry<R extends BaseRoute = BaseRoute, V = any>(
         searchDepsKey(searchDeps, nextSearch)
     );
   });
-  return unchanged ? {location, task: Promise.resolve(view)} : undefined;
+  if (!unchanged) return undefined;
+  // The fast path must not skip validation a full resolution would run:
+  // every matched level's declared search schema validates the target's
+  // raw search(`parseSearchInput` → schema, exactly what `parseSearch`
+  // feeds it) before the snapshot is re-served. A rejection — or an
+  // async schema, whose verdict cannot be known synchronously — abandons
+  // the fast path, so the full resolution re-parses the search and
+  // surfaces the `SearchError` through its error channel(guard/data
+  // phase → `errorHandler`) instead of silently committing an invalid
+  // value into the URL. An async schema therefore always opts its chain
+  // out of the fast path.
+  return matched.every(({route}) => {
+    if (!route.search) return true;
+    try {
+      parseSearchSync(route.search, location.search);
+      return true;
+    } catch {
+      return false;
+    }
+  })
+    ? {location, task: Promise.resolve(view)}
+    : undefined;
 }
 
 /**
